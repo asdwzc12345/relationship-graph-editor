@@ -1,0 +1,71 @@
+{
+  "version": 2,
+  "meta": {
+    "title": "分组关系导入测试",
+    "canvasWidth": 1200,
+    "canvasHeight": 800
+  },
+  "groups": [
+    {
+      "id": "group_a",
+      "label": "分组 A",
+      "x": 80,
+      "y": 100,
+      "w": 320,
+      "h": 420
+    },
+    {
+      "id": "group_b",
+      "label": "分组 B",
+      "x": 760,
+      "y": 160,
+      "w": 320,
+      "h": 420
+    }
+  ],
+  "nodes": [
+    {
+      "id": "node_a",
+      "label": "节点 A",
+      "type": "测试节点",
+      "group": "group_a",
+      "x": 160,
+      "y": 280,
+      "w": 150,
+      "h": 54,
+      "note": "用于验证节点与分组之间的关系"
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge_group_node",
+      "source": "group_a",
+      "sourceType": "group",
+      "target": "node_a",
+      "targetType": "node",
+      "label": "包含说明",
+      "category": "core",
+      "lineType": "curve"
+    },
+    {
+      "id": "edge_node_group",
+      "source": "node_a",
+      "sourceType": "node",
+      "target": "group_b",
+      "targetType": "group",
+      "label": "关联分组",
+      "category": "core",
+      "lineType": "polyline"
+    },
+    {
+      "id": "edge_group_group",
+      "source": "group_a",
+      "sourceType": "group",
+      "target": "group_b",
+      "targetType": "group",
+      "label": "分组协作",
+      "category": "core",
+      "lineType": "straight"
+    }
+  ]
+}

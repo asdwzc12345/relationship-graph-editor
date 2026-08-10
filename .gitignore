@@ -1,0 +1,19 @@
+# Local dependencies and generated build output
+node_modules/
+bin/
+obj/
+.vs/
+
+# User-specific IDE files
+*.user
+*.suo
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+Desktop.ini

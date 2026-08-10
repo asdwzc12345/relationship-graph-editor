@@ -1,0 +1,17 @@
+{
+  "version": 2,
+  "meta": { "title": "无效导入测试", "canvasWidth": 1200, "canvasHeight": 800 },
+  "groups": [
+    { "id": "same", "label": "分组一", "x": 0, "y": 0, "w": 400, "h": 400 },
+    { "id": "same", "label": "分组二", "x": 420, "y": 0, "w": 400, "h": 400 }
+  ],
+  "nodes": [
+    { "id": "node_a", "label": "节点A", "kind": "system", "group": "same", "x": 20, "y": 60 },
+    { "id": "node_a", "label": "节点A重复", "kind": "unknown", "group": "missing", "x": 220, "y": 60 }
+  ],
+  "edges": [
+    { "id": "edge_a", "source": "node_a", "target": "missing", "label": "缺少终点", "category": "core" },
+    { "id": "edge_a", "source": "node_a", "target": "node_a", "label": "重复且自连", "category": "missing_type" },
+    { "id": "edge_c", "source": "node_a", "target": "node_a", "label": "重复连接", "category": "core" }
+  ]
+}

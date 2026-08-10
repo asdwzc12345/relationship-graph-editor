@@ -1,0 +1,17 @@
+{
+  "name": "relationship-graph-editor",
+  "version": "4.3.2",
+  "private": true,
+  "description": "纯原生 Windows 桌面关系图编辑器",
+  "scripts": {
+    "test": "npm run build:desktop && node tools/test-native-desktop.mjs",
+    "build:desktop": "powershell -ExecutionPolicy Bypass -File desktop/build-desktop.ps1 -OutputName \"关系图编辑器.exe\"",
+    "audit": "node tools/audit-project.mjs",
+    "audit:routing": "node tools/audit-routing.mjs",
+    "audit:drag": "node tools/audit-drag-performance.mjs",
+    "audit:node-types": "node tools/audit-node-types.mjs",
+    "audit:readiness": "node tools/audit-product-readiness.mjs",
+    "test:desktop": "node tools/test-native-desktop.mjs",
+    "test:native": "node tools/test-native-desktop.mjs"
+  }
+}
