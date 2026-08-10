@@ -5,8 +5,9 @@ import { fileURLToPath } from 'node:url';
 
 const toolDirectory = path.dirname(fileURLToPath(import.meta.url));
 const projectDirectory = path.dirname(toolDirectory);
+const repositoryRoot = path.dirname(projectDirectory);
 const source = fs.readFileSync(path.join(projectDirectory, 'project-store.js'), 'utf8');
-const seedGraph = JSON.parse(fs.readFileSync(path.join(projectDirectory, 'system-function-graph.json'), 'utf8'));
+const seedGraph = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'system-function-graph.json'), 'utf8'));
 const values = new Map();
 const localStorage = {
   getItem: key => values.has(key) ? values.get(key) : null,

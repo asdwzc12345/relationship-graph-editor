@@ -13,28 +13,28 @@ namespace RelationshipGraphNative
     {
         public static void SaveJson(GraphDocument graph, string fileName)
         {
-            File.WriteAllText(fileName, GraphSerialization.Serialize(graph, true), new UTF8Encoding(false));
+            NativePersistence.WriteAllTextAtomic(fileName, GraphSerialization.Serialize(graph, true), new UTF8Encoding(false), true);
         }
 
         public static void SavePng(GraphCanvas canvas, string fileName)
         {
             using (Bitmap bitmap = canvas.ExportBitmap(8192))
-                bitmap.Save(fileName, ImageFormat.Png);
+                NativePersistence.WriteStreamAtomic(fileName, false, delegate(Stream stream) { bitmap.Save(stream, ImageFormat.Png); });
         }
 
         public static void SaveSvg(GraphDocument graph, string fileName)
         {
-            File.WriteAllText(fileName, BuildSvg(graph), new UTF8Encoding(false));
+            NativePersistence.WriteAllTextAtomic(fileName, BuildSvg(graph), new UTF8Encoding(false), false);
         }
 
         public static void SaveDrawio(GraphDocument graph, string fileName)
         {
-            File.WriteAllText(fileName, BuildDrawio(graph), new UTF8Encoding(false));
+            NativePersistence.WriteAllTextAtomic(fileName, BuildDrawio(graph), new UTF8Encoding(false), false);
         }
 
         public static void SaveReadonlyHtml(GraphDocument graph, string fileName)
         {
-            File.WriteAllText(fileName, BuildReadonlyHtml(graph), new UTF8Encoding(false));
+            NativePersistence.WriteAllTextAtomic(fileName, BuildReadonlyHtml(graph), new UTF8Encoding(false), false);
         }
 
         public static string BuildReadonlyHtml(GraphDocument graph)
@@ -153,17 +153,8 @@ applyTheme();setView();
 
         public static void SavePdf(GraphCanvas canvas, string fileName)
         {
-            using (Bitmap bitmap = canvas.ExportBitmap(4096))
-            using (MemoryStream imageStream = new MemoryStream())
-            {
-                ImageCodecInfo jpeg = ImageCodecInfo.GetImageEncoders().First(delegate(ImageCodecInfo item) { return item.MimeType == "image/jpeg"; });
-                using (EncoderParameters parameters = new EncoderParameters(1))
-                {
-                    parameters.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 92L);
-                    bitmap.Save(imageStream, jpeg, parameters);
-                }
-                WriteSingleImagePdf(fileName, imageStream.ToArray(), bitmap.Width, bitmap.Height);
-            }
+            if (canvas == null || canvas.Document == null) throw new InvalidOperationException("没有可导出的关系图。");
+            NativePersistence.WriteStreamAtomic(fileName, false, delegate(Stream stream) { NativePdfExport.Write(canvas.Document, stream); });
         }
 
         public static string BuildDrawio(GraphDocument graph)
@@ -351,38 +342,6 @@ applyTheme();setView();
             if (!hasContent) { minX = maxX = point.X; minY = maxY = point.Y; hasContent = true; return; }
             minX = Math.Min(minX, point.X); minY = Math.Min(minY, point.Y);
             maxX = Math.Max(maxX, point.X); maxY = Math.Max(maxY, point.Y);
-        }
-
-        private static void WriteSingleImagePdf(string fileName, byte[] jpeg, int width, int height)
-        {
-            float pageWidth = width, pageHeight = height;
-            if (pageWidth > 14400 || pageHeight > 14400)
-            {
-                float scale = Math.Min(14400f / pageWidth, 14400f / pageHeight);
-                pageWidth *= scale; pageHeight *= scale;
-            }
-            using (FileStream stream = new FileStream(fileName, FileMode.Create, FileAccess.Write, FileShare.None))
-            {
-                List<long> offsets = new List<long>(); offsets.Add(0);
-                WriteAscii(stream, "%PDF-1.4\n%\u00e2\u00e3\u00cf\u00d3\n");
-                offsets.Add(stream.Position); WriteAscii(stream, "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
-                offsets.Add(stream.Position); WriteAscii(stream, "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
-                offsets.Add(stream.Position); WriteAscii(stream, "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 " + Number(pageWidth) + " " + Number(pageHeight) + "] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>\nendobj\n");
-                offsets.Add(stream.Position); WriteAscii(stream, "4 0 obj\n<< /Type /XObject /Subtype /Image /Width " + width + " /Height " + height + " /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length " + jpeg.Length + " >>\nstream\n");
-                stream.Write(jpeg, 0, jpeg.Length); WriteAscii(stream, "\nendstream\nendobj\n");
-                string content = "q\n" + Number(pageWidth) + " 0 0 " + Number(pageHeight) + " 0 0 cm\n/Im0 Do\nQ\n";
-                offsets.Add(stream.Position); WriteAscii(stream, "5 0 obj\n<< /Length " + Encoding.ASCII.GetByteCount(content) + " >>\nstream\n" + content + "endstream\nendobj\n");
-                long xref = stream.Position;
-                WriteAscii(stream, "xref\n0 6\n0000000000 65535 f \n");
-                for (int i = 1; i <= 5; i++) WriteAscii(stream, offsets[i].ToString("0000000000", CultureInfo.InvariantCulture) + " 00000 n \n");
-                WriteAscii(stream, "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n" + xref.ToString(CultureInfo.InvariantCulture) + "\n%%EOF\n");
-            }
-        }
-
-        private static void WriteAscii(Stream stream, string value)
-        {
-            byte[] bytes = Encoding.GetEncoding(1252).GetBytes(value);
-            stream.Write(bytes, 0, bytes.Length);
         }
 
         private static bool TryRect(string type, string id, Dictionary<string, GraphNode> nodes, Dictionary<string, GraphGroup> groups, out RectangleF rect)

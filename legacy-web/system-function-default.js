@@ -1,5 +1,5 @@
 window.DEFAULT_GRAPH = {
-  "version": 1,
+  "version": 3,
   "meta": {
     "title": "测试用图",
     "canvasWidth": 1380,
@@ -250,25 +250,11 @@ window.DEFAULT_GRAPH = {
       "category": "core"
     },
     {
-      "id": "e06",
-      "source": "available_resource",
-      "target": "execute",
-      "label": "提供支持",
-      "category": "economy"
-    },
-    {
       "id": "e07",
       "source": "execute",
       "target": "quality_check",
       "label": "提交检查",
       "category": "core"
-    },
-    {
-      "id": "e08",
-      "source": "clear_goal",
-      "target": "quality_check",
-      "label": "验收标准",
-      "category": "content"
     },
     {
       "id": "e09",
@@ -292,13 +278,6 @@ window.DEFAULT_GRAPH = {
       "category": "growth"
     },
     {
-      "id": "e12",
-      "source": "quality_check",
-      "target": "improve_plan",
-      "label": "发现问题",
-      "category": "growth"
-    },
-    {
       "id": "e13",
       "source": "process_record",
       "target": "improve_plan",
@@ -317,13 +296,6 @@ window.DEFAULT_GRAPH = {
       "source": "improve_plan",
       "target": "next_cycle",
       "label": "形成优化项",
-      "category": "growth"
-    },
-    {
-      "id": "e16",
-      "source": "next_cycle",
-      "target": "analyze",
-      "label": "进入下一轮",
       "category": "growth"
     }
   ]

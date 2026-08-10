@@ -1,8 +1,16 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const htmlPath = path.resolve(process.argv[2] || '测试用图.html');
-const graphPath = path.resolve(process.argv[3] || 'system-function-graph.json');
+const toolDirectory = path.dirname(fileURLToPath(import.meta.url));
+const legacyDirectory = path.dirname(toolDirectory);
+const repositoryRoot = path.dirname(legacyDirectory);
+const htmlPath = process.argv[2]
+  ? path.resolve(process.argv[2])
+  : path.join(legacyDirectory, '测试用图.html');
+const graphPath = process.argv[3]
+  ? path.resolve(process.argv[3])
+  : path.join(repositoryRoot, 'system-function-graph.json');
 const html = fs.readFileSync(htmlPath, 'utf8');
 const graph = JSON.parse(fs.readFileSync(graphPath, 'utf8'));
 const data = JSON.stringify(graph).replace(/</g, '\\u003c');

@@ -5,7 +5,13 @@ import { fileURLToPath } from 'node:url';
 
 const toolDirectory = path.dirname(fileURLToPath(import.meta.url));
 const projectDirectory = path.dirname(toolDirectory);
-const read = file => fs.readFileSync(path.join(projectDirectory, file), 'utf8');
+const repositoryRoot = path.dirname(projectDirectory);
+const repositoryFiles = new Set([
+  'CHANGELOG.md',
+  'system-function-graph.json'
+]);
+const resolveFile = file => path.join(repositoryFiles.has(file) ? repositoryRoot : projectDirectory, file);
+const read = file => fs.readFileSync(resolveFile(file), 'utf8');
 
 const html = read('index.html');
 const app = read('app.js');
@@ -195,9 +201,7 @@ const textFiles = [
   'README.md',
   'CHANGELOG.md',
   'desktop/RelationshipGraphLauncher.cs',
-  'desktop/build-desktop.ps1',
   'tools/test-desktop-experience.mjs',
-  'tools/build-app-icon.py',
   'readonly-export.js',
   'tests/fixtures/import-ungrouped.json',
   'tests/fixtures/import-group-relations.json',

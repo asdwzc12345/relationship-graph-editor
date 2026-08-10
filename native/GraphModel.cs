@@ -112,6 +112,7 @@ namespace RelationshipGraphNative
         public const int MaxNodes = 1500;
         public const int MaxEdges = 7500;
         public const float MaxItemDimension = 1000000f;
+        public const float MaxCoordinate = 100000000f;
         private static readonly JavaScriptSerializer Serializer = CreateSerializer();
 
         private static JavaScriptSerializer CreateSerializer()
@@ -271,8 +272,8 @@ namespace RelationshipGraphNative
                 group.groups = new List<string>();
                 group.w = Clamp(Finite(group.w, 260), 120, MaxItemDimension);
                 group.h = Clamp(Finite(group.h, 220), 100, MaxItemDimension);
-                group.x = Finite(group.x, 20);
-                group.y = Finite(group.y, 40);
+                group.x = Clamp(Finite(group.x, 20), -MaxCoordinate, MaxCoordinate);
+                group.y = Clamp(Finite(group.y, 40), -MaxCoordinate, MaxCoordinate);
                 graph.groups[i] = group;
             }
 
@@ -294,8 +295,8 @@ namespace RelationshipGraphNative
                 node.groups = new List<string>();
                 node.w = Clamp(Finite(node.w, 150), 105, MaxItemDimension);
                 node.h = Clamp(Finite(node.h, 54), 46, MaxItemDimension);
-                node.x = Finite(node.x, 40);
-                node.y = Finite(node.y, 80);
+                node.x = Clamp(Finite(node.x, 40), -MaxCoordinate, MaxCoordinate);
+                node.y = Clamp(Finite(node.y, 80), -MaxCoordinate, MaxCoordinate);
                 node.note = Clean(node.note, "", 300);
                 graph.nodes[i] = node;
             }

@@ -5,12 +5,13 @@ import { fileURLToPath } from 'node:url';
 
 const toolDir = path.dirname(fileURLToPath(import.meta.url));
 const projectDir = path.dirname(toolDir);
-const graphPath = path.join(projectDir, 'system-function-graph.json');
+const repositoryRoot = path.dirname(projectDir);
+const graphPath = path.join(repositoryRoot, 'system-function-graph.json');
 const exporterPath = path.join(projectDir, 'readonly-export.js');
-const safeTitle = String(graph.meta?.title || '关系图').replace(/[<>:"/\\|?*]/g, '_');
-const outputPath = path.join(projectDir, `${safeTitle}.html`);
-
 const graph = JSON.parse(fs.readFileSync(graphPath, 'utf8'));
+const safeTitle = String(graph.meta?.title || '关系图').replace(/[<>:"/\\|?*]/g, '_');
+const outputPath = process.argv[2] ? path.resolve(process.argv[2]) : path.join(projectDir, `${safeTitle}.html`);
+
 const sandbox = { window: {} };
 vm.createContext(sandbox);
 vm.runInContext(fs.readFileSync(exporterPath, 'utf8'), sandbox);

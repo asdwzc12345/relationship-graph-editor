@@ -9,9 +9,24 @@ namespace RelationshipGraphNative
 {
     public sealed class GraphCommitEventArgs : EventArgs
     {
-        public GraphDocument Before { get; private set; }
+        private GraphDocument _before;
+        public string BeforeJson { get; private set; }
+        public GraphDocument Before
+        {
+            get
+            {
+                if (_before == null && !String.IsNullOrEmpty(BeforeJson)) _before = GraphSerialization.Deserialize(BeforeJson);
+                return _before;
+            }
+        }
         public string Message { get; private set; }
-        public GraphCommitEventArgs(GraphDocument before, string message) { Before = before; Message = message; }
+        public GraphCommitEventArgs(string beforeJson, string message) { BeforeJson = beforeJson; Message = message; }
+        public GraphCommitEventArgs(GraphDocument before, string message)
+        {
+            _before = before;
+            BeforeJson = before == null ? null : GraphSerialization.Serialize(before, false);
+            Message = message;
+        }
     }
 
     public sealed class CanvasPointEventArgs : EventArgs
@@ -37,23 +52,68 @@ namespace RelationshipGraphNative
         public float Difference;
     }
 
+    internal sealed class CachedEdgeGeometry : IDisposable
+    {
+        public string SourceType;
+        public string SourceId;
+        public string TargetType;
+        public string TargetId;
+        public string SourceSide;
+        public string TargetSide;
+        public string LineType;
+        public RectangleF SourceRect;
+        public RectangleF TargetRect;
+        public GraphicsPath Path;
+        public RectangleF Bounds;
+        public PointF ArrowEnd;
+        public PointF ArrowPrevious;
+        public PointF LabelPoint;
+        public bool HasArrow;
+
+        public bool Matches(GraphEdge edge, RectangleF sourceRect, RectangleF targetRect)
+        {
+            return edge != null && SourceRect.Equals(sourceRect) && TargetRect.Equals(targetRect) &&
+                String.Equals(SourceType, edge.sourceType, StringComparison.Ordinal) &&
+                String.Equals(SourceId, edge.source, StringComparison.Ordinal) &&
+                String.Equals(TargetType, edge.targetType, StringComparison.Ordinal) &&
+                String.Equals(TargetId, edge.target, StringComparison.Ordinal) &&
+                String.Equals(SourceSide, edge.sourceSide, StringComparison.Ordinal) &&
+                String.Equals(TargetSide, edge.targetSide, StringComparison.Ordinal) &&
+                String.Equals(LineType, edge.lineType, StringComparison.Ordinal);
+        }
+
+        public void Dispose()
+        {
+            if (Path != null) { Path.Dispose(); Path = null; }
+        }
+    }
+
     public sealed class GraphCanvas : Control
     {
+        private const float MinimumSafeZoom = 0.00000001f;
+        private const float ManualMinimumZoom = 0.01f;
+        private const float MaximumFitZoom = 2.5f;
+        private const float MaximumZoom = 4f;
+        private const float MaximumViewOffset = (GraphSerialization.MaxCoordinate + GraphSerialization.MaxItemDimension) * MaximumZoom + GraphSerialization.MaxItemDimension;
         private GraphDocument _document;
         private readonly Dictionary<string, GraphNode> _nodes = new Dictionary<string, GraphNode>(StringComparer.Ordinal);
         private readonly Dictionary<string, GraphGroup> _groups = new Dictionary<string, GraphGroup>(StringComparer.Ordinal);
+        private readonly Dictionary<string, CachedEdgeGeometry> _edgeGeometry = new Dictionary<string, CachedEdgeGeometry>(StringComparer.Ordinal);
+        private List<GraphGroup> _groupDrawOrder;
         private float _zoom = 1f;
         private float _offsetX = 20f;
         private float _offsetY = 20f;
+        private bool _fitToViewActive;
         private CanvasGesture _gesture;
         private Point _mouseDown;
         private Point _lastMouse;
         private PointF _worldDown;
         private PointF _worldCurrent;
         private bool _gestureMoved;
-        private GraphDocument _gestureBefore;
+        private string _gestureBeforeJson;
         private readonly Dictionary<string, PointF> _nodeStarts = new Dictionary<string, PointF>();
         private readonly Dictionary<string, RectangleF> _groupStarts = new Dictionary<string, RectangleF>();
+        private readonly List<RectangleF> _alignmentCandidates = new List<RectangleF>();
         private RectangleF _groupStart;
         private string _gestureEntityType = "";
         private string _gestureEntityId = "";
@@ -69,16 +129,29 @@ namespace RelationshipGraphNative
         private float _alignmentGuideY = Single.NaN;
         private EqualSpacingHint _horizontalSpacingHint;
         private EqualSpacingHint _verticalSpacingHint;
+        private HashSet<string> _gestureFocusEntities;
+        private HashSet<string> _gestureFocusEdges;
+        private HashSet<string> _gestureInactiveSameNameNodes;
         private readonly HashSet<string> _selectedNodes = new HashSet<string>(StringComparer.Ordinal);
         private readonly HashSet<string> _selectedGroups = new HashSet<string>(StringComparer.Ordinal);
         private string _selectedType = "";
         private string _selectedId = "";
+        private string _focusDirection;
+        private int _focusDepth;
         private bool _darkTheme;
         private TextBox _inlineEditor;
+        private Font _inlineEditorFont;
         private string _inlineEditType = "";
         private string _inlineEditId = "";
         private string _inlineEditField = "";
         private bool _finishingInlineEdit;
+        private Font _ownedCanvasFont;
+        private Font _nodeTypeFont;
+        private Font _nodeLabelFont;
+        private Font _spacingFont;
+        private StringFormat _nodeLabelFormat;
+        private StringFormat _entityHeaderFormat;
+        private bool _disposingResources;
 
         public event EventHandler SelectionChanged;
         public event EventHandler<GraphCommitEventArgs> GraphCommitted;
@@ -91,8 +164,66 @@ namespace RelationshipGraphNative
             ResizeRedraw = true;
             TabStop = true;
             BackColor = Color.FromArgb(244, 247, 250);
-            Font = new Font("Microsoft YaHei UI", 9f, FontStyle.Regular, GraphicsUnit.Point);
+            // Canvas geometry is expressed in world pixels. Pixel fonts keep text and
+            // node proportions stable when Windows changes the monitor DPI.
+            _ownedCanvasFont = new Font("Microsoft YaHei UI", 12f, FontStyle.Regular, GraphicsUnit.Pixel);
+            Font = _ownedCanvasFont;
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.StandardClick | ControlStyles.StandardDoubleClick, true);
+        }
+
+        protected override void OnFontChanged(EventArgs e)
+        {
+            base.OnFontChanged(e);
+            DisposeDrawingResources();
+            if (!_disposingResources) Invalidate();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _disposingResources = true;
+                if (_inlineEditor != null)
+                {
+                    TextBox editor = _inlineEditor;
+                    _inlineEditor = null;
+                    editor.Dispose();
+                }
+                DisposeInlineEditorFont();
+                DisposeDrawingResources();
+                ClearEdgeGeometryCache();
+                if (_ownedCanvasFont != null) { _ownedCanvasFont.Dispose(); _ownedCanvasFont = null; }
+            }
+            base.Dispose(disposing);
+        }
+
+        private void EnsureDrawingResources()
+        {
+            if (_nodeTypeFont == null) _nodeTypeFont = new Font(Font.FontFamily, 10.4f, FontStyle.Regular, GraphicsUnit.Pixel);
+            if (_nodeLabelFont == null) _nodeLabelFont = new Font(Font.FontFamily, 12.3f, FontStyle.Bold, GraphicsUnit.Pixel);
+            if (_spacingFont == null) _spacingFont = new Font(Font.FontFamily, 10.4f, FontStyle.Bold, GraphicsUnit.Pixel);
+            if (_nodeLabelFormat == null) _nodeLabelFormat = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+            if (_entityHeaderFormat == null) _entityHeaderFormat = new StringFormat { FormatFlags = StringFormatFlags.NoWrap, Trimming = StringTrimming.EllipsisCharacter };
+        }
+
+        private void DisposeDrawingResources()
+        {
+            if (_nodeTypeFont != null) { _nodeTypeFont.Dispose(); _nodeTypeFont = null; }
+            if (_nodeLabelFont != null) { _nodeLabelFont.Dispose(); _nodeLabelFont = null; }
+            if (_spacingFont != null) { _spacingFont.Dispose(); _spacingFont = null; }
+            if (_nodeLabelFormat != null) { _nodeLabelFormat.Dispose(); _nodeLabelFormat = null; }
+            if (_entityHeaderFormat != null) { _entityHeaderFormat.Dispose(); _entityHeaderFormat = null; }
+        }
+
+        private void DisposeInlineEditorFont()
+        {
+            if (_inlineEditorFont != null) { _inlineEditorFont.Dispose(); _inlineEditorFont = null; }
+        }
+
+        private void ClearEdgeGeometryCache()
+        {
+            foreach (CachedEdgeGeometry geometry in _edgeGeometry.Values) geometry.Dispose();
+            _edgeGeometry.Clear();
         }
 
         public GraphDocument Document
@@ -100,6 +231,7 @@ namespace RelationshipGraphNative
             get { return _document; }
             set
             {
+                CommitPendingEdit();
                 _document = GraphSerialization.Normalize(value);
                 RebuildIndexes();
                 ClearSelection(false);
@@ -110,8 +242,16 @@ namespace RelationshipGraphNative
 
         public bool EditMode { get; set; }
         public string NewLineType { get; set; }
-        public string FocusDirection { get; set; }
-        public int FocusDepth { get; set; }
+        public string FocusDirection
+        {
+            get { return _focusDirection; }
+            set { if (_focusDirection != value) { _focusDirection = value; ClearGestureFocusCache(); Invalidate(); } }
+        }
+        public int FocusDepth
+        {
+            get { return _focusDepth; }
+            set { if (_focusDepth != value) { _focusDepth = value; ClearGestureFocusCache(); Invalidate(); } }
+        }
         public string SelectedType { get { return _selectedType; } }
         public string SelectedId { get { return _selectedId; } }
         public ICollection<string> SelectedNodeIds { get { return _selectedNodes; } }
@@ -121,7 +261,11 @@ namespace RelationshipGraphNative
         public PointF ViewOffset { get { return new PointF(_offsetX, _offsetY); } }
         public PointF ViewCenterWorld
         {
-            get { return new PointF((ClientSize.Width / 2f - _offsetX) / _zoom, (ClientSize.Height / 2f - _offsetY) / _zoom); }
+            get
+            {
+                float zoom = SafeZoom(_zoom), offsetX = ClampViewOffset(_offsetX), offsetY = ClampViewOffset(_offsetY);
+                return new PointF((ClientSize.Width / 2f - offsetX) / zoom, (ClientSize.Height / 2f - offsetY) / zoom);
+            }
         }
         public bool DarkTheme
         {
@@ -141,8 +285,10 @@ namespace RelationshipGraphNative
         }
         internal bool InlineEditorActiveForTesting { get { return _inlineEditor != null; } }
         internal string InlineEditFieldForTesting { get { return _inlineEditField; } }
+        internal bool GestureSnapshotAvailableForTesting { get { return _gestureBeforeJson != null; } }
         internal void SetInlineEditorTextForTesting(string value) { if (_inlineEditor != null) _inlineEditor.Text = value; }
-        internal void CommitInlineEditForTesting() { FinishInlineEdit(true); }
+        internal void CommitPendingEdit() { FinishInlineEdit(true); }
+        internal void CommitInlineEditForTesting() { CommitPendingEdit(); }
 
         public void RefreshDocument()
         {
@@ -232,14 +378,32 @@ namespace RelationshipGraphNative
         {
             if (_document == null || ClientSize.Width < 20 || ClientSize.Height < 20) return;
             RectangleF bounds = ContentBounds(30f);
-            float availableWidth = Math.Max(100, ClientSize.Width - 40);
-            float availableHeight = Math.Max(100, ClientSize.Height - 40);
-            _zoom = Math.Min(availableWidth / bounds.Width, availableHeight / bounds.Height);
-            _zoom = Math.Max(0.01f, Math.Min(2.5f, _zoom));
-            _offsetX = ClientSize.Width / 2f - (bounds.Left + bounds.Width / 2f) * _zoom;
-            _offsetY = ClientSize.Height / 2f - (bounds.Top + bounds.Height / 2f) * _zoom;
+            if (!IsFiniteRectangle(bounds)) bounds = DefaultContentBounds();
+            _zoom = CalculateFitZoom(bounds, MaximumFitZoom);
+            double centerX = (double)bounds.Left + bounds.Width / 2d, centerY = (double)bounds.Top + bounds.Height / 2d;
+            _offsetX = ClampViewOffset(ClientSize.Width / 2d - centerX * _zoom);
+            _offsetY = ClampViewOffset(ClientSize.Height / 2d - centerY * _zoom);
+            _fitToViewActive = true;
             Invalidate();
             if (ViewChanged != null) ViewChanged(this, EventArgs.Empty);
+        }
+
+        private float CalculateFitZoom(RectangleF bounds, float maximum)
+        {
+            double availableWidth = Math.Max(100, ClientSize.Width - 40);
+            double availableHeight = Math.Max(100, ClientSize.Height - 40);
+            double width = IsFinite(bounds.Width) && bounds.Width > 0 ? bounds.Width : 1d;
+            double height = IsFinite(bounds.Height) && bounds.Height > 0 ? bounds.Height : 1d;
+            double safeMaximum = IsFinite(maximum) && maximum > 0 ? maximum : MaximumFitZoom;
+            double fit = Math.Min(availableWidth / width, availableHeight / height);
+            if (Double.IsNaN(fit) || Double.IsInfinity(fit) || fit <= 0) fit = MinimumSafeZoom;
+            return (float)Math.Max(MinimumSafeZoom, Math.Min(safeMaximum, fit));
+        }
+
+        private float ManualZoomFloor()
+        {
+            if (_document == null || ClientSize.Width < 20 || ClientSize.Height < 20) return ManualMinimumZoom;
+            return Math.Min(ManualMinimumZoom, CalculateFitZoom(ContentBounds(30f), ManualMinimumZoom));
         }
 
         public void ZoomBy(float factor)
@@ -250,9 +414,9 @@ namespace RelationshipGraphNative
         public void CancelActiveGesture()
         {
             if (_gesture == CanvasGesture.None) return;
-            if (_gestureMoved && _gestureBefore != null && _gesture != CanvasGesture.Pan && _gesture != CanvasGesture.SelectBox)
+            if (_gestureMoved && _gestureBeforeJson != null && _gesture != CanvasGesture.Pan && _gesture != CanvasGesture.SelectBox)
             {
-                _document = GraphSerialization.Clone(_gestureBefore);
+                _document = GraphSerialization.Deserialize(_gestureBeforeJson);
                 RebuildIndexes();
             }
             EndGesture();
@@ -263,7 +427,7 @@ namespace RelationshipGraphNative
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
-            if (_document != null && _zoom <= 0.01f) FitToView();
+            if (_document != null && _fitToViewActive) FitToView();
             PositionInlineEditor();
         }
 
@@ -327,11 +491,14 @@ namespace RelationshipGraphNative
 
         private void ZoomAt(Point screenPoint, float factor)
         {
+            if (Single.IsNaN(factor) || Single.IsInfinity(factor) || factor <= 0) return;
             PointF world = ScreenToWorld(screenPoint);
-            float next = Math.Max(0.01f, Math.Min(4f, _zoom * factor));
-            _zoom = next;
-            _offsetX = screenPoint.X - world.X * _zoom;
-            _offsetY = screenPoint.Y - world.Y * _zoom;
+            double requested = (double)SafeZoom(_zoom) * factor;
+            float next = (float)Math.Max(ManualZoomFloor(), Math.Min(MaximumZoom, requested));
+            _zoom = SafeZoom(next);
+            _offsetX = ClampViewOffset(screenPoint.X - (double)world.X * _zoom);
+            _offsetY = ClampViewOffset(screenPoint.Y - (double)world.Y * _zoom);
+            _fitToViewActive = false;
             Invalidate();
             if (ViewChanged != null) ViewChanged(this, EventArgs.Empty);
         }
@@ -363,7 +530,7 @@ namespace RelationshipGraphNative
             _worldDown = ScreenToWorld(e.Location);
             _worldCurrent = _worldDown;
             _gestureMoved = false;
-            _gestureBefore = null;
+            _gestureBeforeJson = null;
             _collapseMultiOnClick = false;
             _controlToggleOnClick = false;
             _controlNodeWasSelected = false;
@@ -379,7 +546,6 @@ namespace RelationshipGraphNative
                     _resizeHandle = resize;
                     GraphGroup selectedGroup = _groups[_selectedId];
                     _groupStart = RectOf(selectedGroup);
-                    _gestureBefore = GraphSerialization.Clone(_document);
                     Cursor = ResizeCursor(resize);
                     Capture = true;
                     return;
@@ -429,7 +595,6 @@ namespace RelationshipGraphNative
                     _gestureEntityId = node.id;
                     _sourceSide = NearestSide(RectOf(node), _worldDown);
                     _sourceSideLocked = false;
-                    _gestureBefore = GraphSerialization.Clone(_document);
                 }
                 Capture = true;
                 Invalidate();
@@ -455,7 +620,6 @@ namespace RelationshipGraphNative
                     _selectedId = group.id;
                     RaiseSelectionChanged();
                 }
-                _gestureBefore = GraphSerialization.Clone(_document);
                 _gestureEntityType = "group";
                 _gestureEntityId = group.id;
                 if (alreadySelected)
@@ -495,7 +659,6 @@ namespace RelationshipGraphNative
         {
             _gestureEntityType = "node";
             _gestureEntityId = primaryId;
-            _gestureBefore = GraphSerialization.Clone(_document);
             _alignmentGuideX = Single.NaN; _alignmentGuideY = Single.NaN;
             _horizontalSpacingHint = null; _verticalSpacingHint = null;
             _nodeStarts.Clear();
@@ -504,12 +667,12 @@ namespace RelationshipGraphNative
                 GraphNode node;
                 if (_nodes.TryGetValue(id, out node)) _nodeStarts[id] = new PointF(node.x, node.y);
             }
+            CacheAlignmentCandidates();
         }
 
         private void BeginSelectionMove(string primaryType, string primaryId)
         {
             _gestureEntityType = primaryType; _gestureEntityId = primaryId;
-            _gestureBefore = GraphSerialization.Clone(_document);
             _alignmentGuideX = Single.NaN; _alignmentGuideY = Single.NaN;
             _horizontalSpacingHint = null; _verticalSpacingHint = null;
             _nodeStarts.Clear(); _groupStarts.Clear();
@@ -529,6 +692,7 @@ namespace RelationshipGraphNative
                 GraphNode node;
                 if (_nodes.TryGetValue(id, out node)) _nodeStarts[id] = new PointF(node.x, node.y);
             }
+            CacheAlignmentCandidates();
         }
 
         private void ApplySelectionMove(float dx, float dy, bool freePlacement)
@@ -558,11 +722,15 @@ namespace RelationshipGraphNative
             }
             foreach (KeyValuePair<string, RectangleF> pair in _groupStarts)
             {
-                GraphGroup group = _groups[pair.Key]; group.x = pair.Value.X + dx; group.y = pair.Value.Y + dy;
+                GraphGroup group = _groups[pair.Key];
+                group.x = ClampWorldCoordinate((double)pair.Value.X + dx);
+                group.y = ClampWorldCoordinate((double)pair.Value.Y + dy);
             }
             foreach (KeyValuePair<string, PointF> pair in _nodeStarts)
             {
-                GraphNode node = _nodes[pair.Key]; node.x = pair.Value.X + dx; node.y = pair.Value.Y + dy;
+                GraphNode node = _nodes[pair.Key];
+                node.x = ClampWorldCoordinate((double)pair.Value.X + dx);
+                node.y = ClampWorldCoordinate((double)pair.Value.Y + dy);
             }
         }
 
@@ -578,11 +746,14 @@ namespace RelationshipGraphNative
         {
             _gestureEntityType = "group"; _gestureEntityId = groupId;
             _groupStart = RectOf(_groups[groupId]);
+            _alignmentGuideX = Single.NaN; _alignmentGuideY = Single.NaN;
+            _horizontalSpacingHint = null; _verticalSpacingHint = null;
             _nodeStarts.Clear(); _groupStarts.Clear();
             foreach (GraphGroup child in _document.groups)
                 if (child.id != groupId && child.groups != null && child.groups.Contains(groupId)) _groupStarts[child.id] = RectOf(child);
             foreach (GraphNode member in _document.nodes)
                 if (member.groups != null && member.groups.Contains(groupId)) _nodeStarts[member.id] = new PointF(member.x, member.y);
+            CacheAlignmentCandidates();
         }
 
         protected override void OnMouseMove(MouseEventArgs e)
@@ -596,8 +767,10 @@ namespace RelationshipGraphNative
 
             if (_gesture == CanvasGesture.Pan)
             {
-                _offsetX += e.X - _lastMouse.X;
-                _offsetY += e.Y - _lastMouse.Y;
+                int deltaX = e.X - _lastMouse.X, deltaY = e.Y - _lastMouse.Y;
+                _offsetX = ClampViewOffset((double)_offsetX + deltaX);
+                _offsetY = ClampViewOffset((double)_offsetY + deltaY);
+                if (deltaX != 0 || deltaY != 0) _fitToViewActive = false;
                 _lastMouse = e.Location;
             }
             else if (_gesture == CanvasGesture.SelectBox)
@@ -605,13 +778,25 @@ namespace RelationshipGraphNative
                 _selectionScreen = NormalizeRectangle(_mouseDown, e.Location);
             }
             else if (_gesture == CanvasGesture.MoveNodes && _gestureMoved)
+            {
+                EnsureGestureSnapshot();
                 ApplyNodeMove(_worldCurrent.X - _worldDown.X, _worldCurrent.Y - _worldDown.Y, IsFreePlacement(ModifierKeys));
+            }
             else if (_gesture == CanvasGesture.MoveGroup && _gestureMoved)
+            {
+                EnsureGestureSnapshot();
                 ApplyGroupMove(_worldCurrent.X - _worldDown.X, _worldCurrent.Y - _worldDown.Y, IsFreePlacement(ModifierKeys));
+            }
             else if (_gesture == CanvasGesture.MoveSelection && _gestureMoved)
+            {
+                EnsureGestureSnapshot();
                 ApplySelectionMove(_worldCurrent.X - _worldDown.X, _worldCurrent.Y - _worldDown.Y, IsFreePlacement(ModifierKeys));
+            }
             else if (_gesture == CanvasGesture.ResizeGroup && _gestureMoved)
+            {
+                EnsureGestureSnapshot();
                 ApplyGroupResize(_worldCurrent.X - _worldDown.X, _worldCurrent.Y - _worldDown.Y);
+            }
             else if (_gesture == CanvasGesture.Link && _gestureMoved && !_sourceSideLocked)
                 _sourceSide = DirectionSide(_worldDown, _worldCurrent, _sourceSide);
             Invalidate();
@@ -630,7 +815,7 @@ namespace RelationshipGraphNative
             if ((_rightButtonPan && e.Button != MouseButtons.Right) || (!_rightButtonPan && e.Button != MouseButtons.Left)) return;
             _worldCurrent = ScreenToWorld(e.Location);
             CanvasGesture completed = _gesture;
-            GraphDocument before = _gestureBefore;
+            string beforeJson = _gestureBeforeJson;
             bool moved = _gestureMoved;
 
             if (completed == CanvasGesture.SelectBox && moved) ApplySelectionBox();
@@ -642,7 +827,7 @@ namespace RelationshipGraphNative
                 {
                     RefreshAutomaticMemberships();
                     RepairAutomaticSides();
-                    CommitGesture(before, _selectedNodes.Count > 1 ? "多个节点位置已保存" : "节点位置已保存");
+                    CommitGesture(beforeJson, _selectedNodes.Count > 1 ? "多个节点位置已保存" : "节点位置已保存");
                 }
                 else if (_controlToggleOnClick)
                 {
@@ -665,7 +850,7 @@ namespace RelationshipGraphNative
                 {
                     RefreshAutomaticMemberships();
                     RepairAutomaticSides();
-                    CommitGesture(before, "多个节点和分组位置已保存");
+                    CommitGesture(beforeJson, "多个节点和分组位置已保存");
                 }
                 else if (_collapseMultiOnClick)
                 {
@@ -673,9 +858,9 @@ namespace RelationshipGraphNative
                     else SelectEntity("group", _gestureEntityId);
                 }
             }
-            else if (completed == CanvasGesture.MoveGroup && moved) { RefreshAutomaticMemberships(); RepairAutomaticSides(); CommitGesture(before, "分组及组内节点位置已保存"); }
-            else if (completed == CanvasGesture.ResizeGroup && moved) { RefreshAutomaticMemberships(); RepairAutomaticSides(); CommitGesture(before, "分组范围已保存"); }
-            else if (completed == CanvasGesture.Link && moved) CompleteLink(before);
+            else if (completed == CanvasGesture.MoveGroup && moved) { RefreshAutomaticMemberships(); RepairAutomaticSides(); CommitGesture(beforeJson, "分组及组内节点位置已保存"); }
+            else if (completed == CanvasGesture.ResizeGroup && moved) { RefreshAutomaticMemberships(); RepairAutomaticSides(); CommitGesture(beforeJson, "分组范围已保存"); }
+            else if (completed == CanvasGesture.Link && moved) CompleteLink();
 
             EndGesture();
             Invalidate();
@@ -690,7 +875,7 @@ namespace RelationshipGraphNative
         private void EndGesture()
         {
             _gesture = CanvasGesture.None;
-            _gestureBefore = null;
+            _gestureBeforeJson = null;
             _gestureMoved = false;
             _resizeHandle = "";
             _sourceSide = "";
@@ -699,7 +884,13 @@ namespace RelationshipGraphNative
             _controlToggleOnClick = false; _controlNodeWasSelected = false;
             _alignmentGuideX = Single.NaN; _alignmentGuideY = Single.NaN;
             _horizontalSpacingHint = null; _verticalSpacingHint = null;
+            _nodeStarts.Clear();
             _groupStarts.Clear();
+            _alignmentCandidates.Clear();
+            _gestureEntityType = "";
+            _gestureEntityId = "";
+            _collapseMultiOnClick = false;
+            ClearGestureFocusCache();
             Cursor = Cursors.Default;
             _selectionScreen = Rectangle.Empty;
             if (Capture) Capture = false;
@@ -712,7 +903,8 @@ namespace RelationshipGraphNative
             TextBox editor = new TextBox(); _inlineEditor = editor;
             editor.Text = value ?? ""; editor.MaxLength = field == "type" ? 30 : 40; editor.BorderStyle = BorderStyle.FixedSingle;
             editor.TextAlign = field == "label" && (entityType == "node" || entityType == "edge") ? HorizontalAlignment.Center : HorizontalAlignment.Left;
-            editor.Font = new Font(Font.FontFamily, field == "label" && entityType == "node" ? 10f : 9f, field == "label" && entityType == "node" ? FontStyle.Bold : FontStyle.Regular);
+            _inlineEditorFont = new Font(Font.FontFamily, field == "label" && entityType == "node" ? 10f : 9f, field == "label" && entityType == "node" ? FontStyle.Bold : FontStyle.Regular);
+            editor.Font = _inlineEditorFont;
             editor.Tag = worldArea;
             editor.BackColor = _darkTheme ? NativeTheme.DarkInput : Color.White;
             editor.ForeColor = _darkTheme ? NativeTheme.DarkText : NativeTheme.LightText;
@@ -729,8 +921,10 @@ namespace RelationshipGraphNative
         {
             if (_inlineEditor == null || !(_inlineEditor.Tag is RectangleF)) return;
             RectangleF world = (RectangleF)_inlineEditor.Tag;
-            int x = (int)Math.Round(world.X * _zoom + _offsetX), y = (int)Math.Round(world.Y * _zoom + _offsetY);
-            int width = Math.Max(80, (int)Math.Round(world.Width * _zoom)), height = Math.Max(25, (int)Math.Round(world.Height * _zoom));
+            if (!IsFiniteRectangle(world)) return;
+            float zoom = SafeZoom(_zoom), offsetX = ClampViewOffset(_offsetX), offsetY = ClampViewOffset(_offsetY);
+            int x = (int)Math.Round(world.X * zoom + offsetX), y = (int)Math.Round(world.Y * zoom + offsetY);
+            int width = Math.Max(80, (int)Math.Round(world.Width * zoom)), height = Math.Max(25, (int)Math.Round(world.Height * zoom));
             _inlineEditor.SetBounds(x, y, width, height);
         }
 
@@ -742,43 +936,50 @@ namespace RelationshipGraphNative
             string entityType = _inlineEditType, entityId = _inlineEditId, field = _inlineEditField;
             _inlineEditor = null; _inlineEditType = ""; _inlineEditId = ""; _inlineEditField = "";
             editor.Dispose();
+            DisposeInlineEditorFont();
             if (commit && _document != null)
             {
-                GraphDocument before = GraphSerialization.Clone(_document); bool changed = false;
+                string beforeJson = null; bool changed = false;
                 if (entityType == "node")
                 {
                     GraphNode node;
                     if (_nodes.TryGetValue(entityId, out node))
                     {
-                        if (field == "type") { value = value.Length == 0 ? "节点" : value; if (node.type != value) { node.type = value; changed = true; } }
-                        else { value = value.Length == 0 ? "未命名节点" : value; if (node.label != value) { node.label = value; changed = true; } }
+                        if (field == "type") { value = value.Length == 0 ? "节点" : value; if (node.type != value) { beforeJson = GraphSerialization.Serialize(_document, false); node.type = value; changed = true; } }
+                        else { value = value.Length == 0 ? "未命名节点" : value; if (node.label != value) { beforeJson = GraphSerialization.Serialize(_document, false); node.label = value; changed = true; } }
                     }
                 }
                 else if (entityType == "group")
                 {
                     GraphGroup group;
                     value = value.Length == 0 ? "未命名分组" : value;
-                    if (_groups.TryGetValue(entityId, out group) && group.label != value) { group.label = value; changed = true; }
+                    if (_groups.TryGetValue(entityId, out group) && group.label != value) { beforeJson = GraphSerialization.Serialize(_document, false); group.label = value; changed = true; }
                 }
                 else if (entityType == "edge")
                 {
                     GraphEdge edge = _document.edges.FirstOrDefault(delegate(GraphEdge item) { return item.id == entityId; });
-                    if (edge != null && edge.label != value) { edge.label = value; changed = true; }
+                    if (edge != null && edge.label != value) { beforeJson = GraphSerialization.Serialize(_document, false); edge.label = value; changed = true; }
                 }
-                if (changed) CommitGesture(before, field == "type" ? "节点类型已修改" : entityType == "group" ? "分组名称已修改" : entityType == "edge" ? "关系名称已修改" : "节点名称已修改");
+                if (changed) CommitGesture(beforeJson, field == "type" ? "节点类型已修改" : entityType == "group" ? "分组名称已修改" : entityType == "edge" ? "关系名称已修改" : "节点名称已修改");
             }
             _finishingInlineEdit = false;
             Focus(); Invalidate();
         }
 
-        private void CommitGesture(GraphDocument before, string message)
+        private void CommitGesture(string beforeJson, string message)
         {
             _document.meta.updatedAt = DateTime.UtcNow.ToString("o");
-            if (GraphCommitted != null) GraphCommitted(this, new GraphCommitEventArgs(before, message));
+            if (GraphCommitted != null) GraphCommitted(this, new GraphCommitEventArgs(beforeJson, message));
             RaiseSelectionChanged();
         }
 
-        private void CompleteLink(GraphDocument before)
+        private void EnsureGestureSnapshot()
+        {
+            if (_gestureBeforeJson == null && _document != null)
+                _gestureBeforeJson = GraphSerialization.Serialize(_document, false);
+        }
+
+        private void CompleteLink()
         {
             EndpointItem target = HitEndpoint(_worldCurrent, _gestureEntityType, _gestureEntityId);
             if (target == null) return;
@@ -799,6 +1000,7 @@ namespace RelationshipGraphNative
                 SelectEntity("edge", existing.id);
                 return;
             }
+            EnsureGestureSnapshot();
             HashSet<string> ids = new HashSet<string>(_document.edges.Select(delegate(GraphEdge edge) { return edge.id; }));
             RectangleF sourceRect = GetEndpointRect(_gestureEntityType, _gestureEntityId);
             RectangleF targetRect = GetEndpointRect(target.Type, target.Id);
@@ -821,7 +1023,7 @@ namespace RelationshipGraphNative
             _selectedNodes.Clear(); _selectedGroups.Clear();
             _selectedType = "edge";
             _selectedId = created.id;
-            CommitGesture(before, "关系已创建");
+            CommitGesture(_gestureBeforeJson, "关系已创建");
         }
 
         private void ApplyNodeMove(float dx, float dy, bool freePlacement)
@@ -845,8 +1047,8 @@ namespace RelationshipGraphNative
             foreach (KeyValuePair<string, PointF> pair in _nodeStarts)
             {
                 GraphNode node = _nodes[pair.Key];
-                node.x = pair.Value.X + dx;
-                node.y = pair.Value.Y + dy;
+                node.x = ClampWorldCoordinate((double)pair.Value.X + dx);
+                node.y = ClampWorldCoordinate((double)pair.Value.Y + dy);
             }
         }
 
@@ -863,7 +1065,7 @@ namespace RelationshipGraphNative
         {
             _horizontalSpacingHint = null; _verticalSpacingHint = null;
             RectangleF start = RectangleF.FromLTRB(left, top, right, bottom);
-            float threshold = 10f / Math.Max(.1f, _zoom);
+            float threshold = 10f / Math.Max(.1f, SafeZoom(_zoom));
             EqualSpacingHint horizontal = FindEqualSpacing(start, dx, dy, true, threshold);
             if (horizontal != null)
             {
@@ -882,16 +1084,45 @@ namespace RelationshipGraphNative
         private EqualSpacingHint FindEqualSpacing(RectangleF movingStart, float dx, float dy, bool horizontal, float threshold)
         {
             RectangleF moving = OffsetRectangle(movingStart, dx, dy);
-            List<RectangleF> candidates = AlignmentCandidates()
-                .Where(delegate(RectangleF rect) { return OrthogonallyCompatible(moving, rect, horizontal); }).ToList();
-            List<RectangleF> before = candidates.Where(delegate(RectangleF rect) { return AxisEnd(rect, horizontal) <= AxisStart(moving, horizontal) + threshold; })
-                .OrderByDescending(delegate(RectangleF rect) { return AxisEnd(rect, horizontal); }).ToList();
-            List<RectangleF> after = candidates.Where(delegate(RectangleF rect) { return AxisStart(rect, horizontal) >= AxisEnd(moving, horizontal) - threshold; })
-                .OrderBy(delegate(RectangleF rect) { return AxisStart(rect, horizontal); }).ToList();
+            RectangleF nearestBefore = RectangleF.Empty, secondBefore = RectangleF.Empty;
+            RectangleF nearestAfter = RectangleF.Empty, secondAfter = RectangleF.Empty;
+            float nearestBeforeEnd = Single.NegativeInfinity, secondBeforeEnd = Single.NegativeInfinity;
+            float nearestAfterStart = Single.PositiveInfinity, secondAfterStart = Single.PositiveInfinity;
+            bool hasNearestBefore = false, hasSecondBefore = false, hasNearestAfter = false, hasSecondAfter = false;
+            foreach (RectangleF rect in AlignmentCandidates())
+            {
+                if (!OrthogonallyCompatible(moving, rect, horizontal)) continue;
+                float end = AxisEnd(rect, horizontal);
+                if (end <= AxisStart(moving, horizontal) + threshold)
+                {
+                    if (!hasNearestBefore || end > nearestBeforeEnd)
+                    {
+                        secondBefore = nearestBefore; secondBeforeEnd = nearestBeforeEnd; hasSecondBefore = hasNearestBefore;
+                        nearestBefore = rect; nearestBeforeEnd = end; hasNearestBefore = true;
+                    }
+                    else if (!hasSecondBefore || end > secondBeforeEnd)
+                    {
+                        secondBefore = rect; secondBeforeEnd = end; hasSecondBefore = true;
+                    }
+                }
+                float start = AxisStart(rect, horizontal);
+                if (start >= AxisEnd(moving, horizontal) - threshold)
+                {
+                    if (!hasNearestAfter || start < nearestAfterStart)
+                    {
+                        secondAfter = nearestAfter; secondAfterStart = nearestAfterStart; hasSecondAfter = hasNearestAfter;
+                        nearestAfter = rect; nearestAfterStart = start; hasNearestAfter = true;
+                    }
+                    else if (!hasSecondAfter || start < secondAfterStart)
+                    {
+                        secondAfter = rect; secondAfterStart = start; hasSecondAfter = true;
+                    }
+                }
+            }
             EqualSpacingHint best = null;
-            if (before.Count >= 2) ConsiderSpacing(ref best, before[1], before[0], moving, 2, movingStart, dx, dy, horizontal, threshold);
-            if (after.Count >= 2) ConsiderSpacing(ref best, moving, after[0], after[1], 0, movingStart, dx, dy, horizontal, threshold);
-            if (before.Count >= 1 && after.Count >= 1) ConsiderSpacing(ref best, before[0], moving, after[0], 1, movingStart, dx, dy, horizontal, threshold);
+            if (hasSecondBefore) ConsiderSpacing(ref best, secondBefore, nearestBefore, moving, 2, movingStart, dx, dy, horizontal, threshold);
+            if (hasSecondAfter) ConsiderSpacing(ref best, moving, nearestAfter, secondAfter, 0, movingStart, dx, dy, horizontal, threshold);
+            if (hasNearestBefore && hasNearestAfter) ConsiderSpacing(ref best, nearestBefore, moving, nearestAfter, 1, movingStart, dx, dy, horizontal, threshold);
             return best;
         }
 
@@ -945,35 +1176,36 @@ namespace RelationshipGraphNative
         private void ApplyNodeAlignment(float left, float top, float right, float bottom, ref float dx, ref float dy)
         {
             _alignmentGuideX = Single.NaN; _alignmentGuideY = Single.NaN;
-            float threshold = 10f / Math.Max(.1f, _zoom), aligned, guide;
+            float threshold = 10f / Math.Max(.1f, SafeZoom(_zoom)), aligned, guide;
             if (TryAlignNodeAxis(true, left, right, dx, threshold, out aligned, out guide)) { dx = aligned; _alignmentGuideX = guide; }
             if (TryAlignNodeAxis(false, top, bottom, dy, threshold, out aligned, out guide)) { dy = aligned; _alignmentGuideY = guide; }
         }
 
         private bool TryAlignNodeAxis(bool horizontal, float movingStart, float movingEnd, float delta, float threshold, out float alignedDelta, out float guide)
         {
-            float[] moving = { movingStart + delta, (movingStart + movingEnd) / 2f + delta, movingEnd + delta };
+            float movingFirst = movingStart + delta, movingMiddle = (movingStart + movingEnd) / 2f + delta, movingLast = movingEnd + delta;
             float bestDistance = threshold + .001f, bestAdjustment = 0, bestGuide = Single.NaN;
             foreach (RectangleF rect in AlignmentCandidates())
             {
                 float start = horizontal ? rect.Left : rect.Top, end = horizontal ? rect.Right : rect.Bottom;
-                float[] targets = { start, (start + end) / 2f, end };
-                for (int i = 0; i < moving.Length; i++)
-                {
-                    float adjustment = targets[i] - moving[i], distance = Math.Abs(adjustment);
-                    if (distance < bestDistance)
-                    {
-                        bestDistance = distance; bestAdjustment = adjustment; bestGuide = targets[i];
-                    }
-                }
+                ConsiderAlignment(start, movingFirst, ref bestDistance, ref bestAdjustment, ref bestGuide);
+                ConsiderAlignment((start + end) / 2f, movingMiddle, ref bestDistance, ref bestAdjustment, ref bestGuide);
+                ConsiderAlignment(end, movingLast, ref bestDistance, ref bestAdjustment, ref bestGuide);
             }
             if (Single.IsNaN(bestGuide)) { alignedDelta = delta; guide = Single.NaN; return false; }
             alignedDelta = delta + bestAdjustment; guide = bestGuide; return true;
         }
 
-        private List<RectangleF> AlignmentCandidates()
+        private static void ConsiderAlignment(float target, float moving, ref float bestDistance, ref float bestAdjustment, ref float bestGuide)
         {
-            List<RectangleF> candidates = new List<RectangleF>();
+            float adjustment = target - moving, distance = Math.Abs(adjustment);
+            if (distance >= bestDistance) return;
+            bestDistance = distance; bestAdjustment = adjustment; bestGuide = target;
+        }
+
+        private void CacheAlignmentCandidates()
+        {
+            _alignmentCandidates.Clear();
             HashSet<string> movingGroups = new HashSet<string>(StringComparer.Ordinal);
             movingGroups.UnionWith(_groupStarts.Keys);
             if (_gestureEntityType == "group" && _gestureEntityId.Length > 0) movingGroups.Add(_gestureEntityId);
@@ -988,15 +1220,16 @@ namespace RelationshipGraphNative
             foreach (GraphNode node in _document.nodes)
             {
                 if (_nodeStarts.ContainsKey(node.id) || _selectedNodes.Contains(node.id)) continue;
-                candidates.Add(RectOf(node));
+                _alignmentCandidates.Add(RectOf(node));
             }
             foreach (GraphGroup group in _document.groups)
             {
                 if (movingGroups.Contains(group.id)) continue;
-                candidates.Add(RectOf(group));
+                _alignmentCandidates.Add(RectOf(group));
             }
-            return candidates;
         }
+
+        private List<RectangleF> AlignmentCandidates() { return _alignmentCandidates; }
 
         private void ApplyGroupMove(float dx, float dy, bool freePlacement)
         {
@@ -1012,15 +1245,18 @@ namespace RelationshipGraphNative
                 ApplyNodeAlignment(_groupStart.Left, _groupStart.Top, _groupStart.Right, _groupStart.Bottom, ref dx, ref dy);
                 ApplyEqualSpacing(_groupStart.Left, _groupStart.Top, _groupStart.Right, _groupStart.Bottom, ref dx, ref dy);
             }
-            group.x = _groupStart.X + dx; group.y = _groupStart.Y + dy;
+            group.x = ClampWorldCoordinate((double)_groupStart.X + dx);
+            group.y = ClampWorldCoordinate((double)_groupStart.Y + dy);
             foreach (KeyValuePair<string, RectangleF> pair in _groupStarts)
             {
-                GraphGroup child = _groups[pair.Key]; child.x = pair.Value.X + dx; child.y = pair.Value.Y + dy;
+                GraphGroup child = _groups[pair.Key];
+                child.x = ClampWorldCoordinate((double)pair.Value.X + dx);
+                child.y = ClampWorldCoordinate((double)pair.Value.Y + dy);
             }
             foreach (KeyValuePair<string, PointF> pair in _nodeStarts)
             {
-                _nodes[pair.Key].x = pair.Value.X + dx;
-                _nodes[pair.Key].y = pair.Value.Y + dy;
+                _nodes[pair.Key].x = ClampWorldCoordinate((double)pair.Value.X + dx);
+                _nodes[pair.Key].y = ClampWorldCoordinate((double)pair.Value.Y + dy);
             }
         }
 
@@ -1054,9 +1290,10 @@ namespace RelationshipGraphNative
                 right = Math.Max(right, childGroups.Max(delegate(GraphGroup child) { return child.x + child.w + 12; }));
                 bottom = Math.Max(bottom, childGroups.Max(delegate(GraphGroup child) { return child.y + child.h + 12; }));
             }
-            group.x = left; group.y = top;
-            group.w = Math.Max(120, right - left);
-            group.h = Math.Max(100, bottom - top);
+            group.x = ClampWorldCoordinate(left); group.y = ClampWorldCoordinate(top);
+            group.w = ClampItemDimension((double)right - left, 120f);
+            group.h = ClampItemDimension((double)bottom - top, 100f);
+            _groupDrawOrder = null;
         }
 
         private void RefreshAutomaticMemberships()
@@ -1093,98 +1330,156 @@ namespace RelationshipGraphNative
         public Bitmap ExportBitmap(int maximumDimension)
         {
             RectangleF bounds = ContentBounds(36f);
-            float scale = Math.Min(2f, (float)maximumDimension / Math.Max(bounds.Width, bounds.Height));
-            scale = Math.Min(scale, (float)Math.Sqrt(32000000d / Math.Max(1d, bounds.Width * bounds.Height)));
+            if (!IsFiniteRectangle(bounds)) bounds = DefaultContentBounds();
+            int safeMaximumDimension = Math.Max(1, maximumDimension);
+            double area = Math.Max(1d, (double)bounds.Width * bounds.Height);
+            float scale = Math.Min(2f, safeMaximumDimension / Math.Max(bounds.Width, bounds.Height));
+            scale = SafeZoom(Math.Min(scale, (float)Math.Sqrt(32000000d / area)));
             int width = Math.Max(1, (int)Math.Round(bounds.Width * scale));
             int height = Math.Max(1, (int)Math.Round(bounds.Height * scale));
             Bitmap bitmap = new Bitmap(width, height, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
-            using (Graphics graphics = Graphics.FromImage(bitmap))
+            try
             {
-                graphics.Clear(_darkTheme ? Color.FromArgb(25, 31, 38) : Color.White);
-                DrawGraph(graphics, scale, -bounds.X * scale, -bounds.Y * scale, false);
+                using (Graphics graphics = Graphics.FromImage(bitmap))
+                {
+                    graphics.Clear(_darkTheme ? Color.FromArgb(25, 31, 38) : Color.White);
+                    DrawGraph(graphics, scale, -bounds.X * scale, -bounds.Y * scale, false);
+                }
+                return bitmap;
             }
-            return bitmap;
+            catch
+            {
+                bitmap.Dispose();
+                throw;
+            }
         }
 
         private void DrawGraph(Graphics graphics, float zoom, float offsetX, float offsetY, bool interactive)
         {
-            graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+            zoom = SafeZoom(zoom);
+            offsetX = ClampViewOffset(offsetX);
+            offsetY = ClampViewOffset(offsetY);
+            EnsureDrawingResources();
             GraphicsState state = graphics.Save();
-            graphics.TranslateTransform(offsetX, offsetY);
-            graphics.ScaleTransform(zoom, zoom);
-            float unit = 1f / zoom;
-            HashSet<string> focusEntities;
-            HashSet<string> focusEdges;
-            ComputeFocus(out focusEntities, out focusEdges);
-            bool focused = interactive && ShouldHighlightNeighbors();
-
-            foreach (GraphGroup group in GroupsBackToFront())
+            try
             {
-                string key = GraphSerialization.EndpointKey("group", group.id);
-                bool selected = interactive && _selectedGroups.Contains(group.id);
-                bool related = focused && focusEntities.Contains(key) && !selected;
-                bool dim = focused && !focusEntities.Contains(key);
-                Color border = selected ? Color.FromArgb(76, 139, 245) : related ? Color.FromArgb(74, 190, 126) : (_darkTheme ? Color.FromArgb(101, 116, 130) : Color.FromArgb(155, 166, 178));
-                using (GraphicsPath shape = RoundRect(RectOf(group), 12))
-                using (Brush fill = new SolidBrush(Color.FromArgb(dim ? 18 : (_darkTheme ? 100 : 50), _darkTheme ? Color.FromArgb(48, 57, 67) : Color.FromArgb(215, 222, 230)))) graphics.FillPath(fill, shape);
-                using (Pen pen = new Pen(Color.FromArgb(dim ? 35 : 220, border), (selected || related ? 3f : 1.4f) * unit))
-                using (GraphicsPath shape = RoundRect(RectOf(group), 12))
+                graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+                graphics.TranslateTransform(offsetX, offsetY);
+                graphics.ScaleTransform(zoom, zoom);
+                float unit = 1f / zoom;
+                RectangleF visible = interactive ? VisibleWorldRectangle(zoom, offsetX, offsetY) : RectangleF.Empty;
+                RectangleF paddedVisible = visible;
+                if (interactive) paddedVisible.Inflate(16f * unit, 16f * unit);
+                HashSet<string> focusEntities;
+                HashSet<string> focusEdges;
+                HashSet<string> inactiveSameNameNodes;
+                bool focused = interactive && ShouldHighlightNeighbors();
+                if (focused) GetFocusForDrawing(out focusEntities, out focusEdges, out inactiveSameNameNodes);
+                else
                 {
-                    if (!selected && !related) pen.DashStyle = DashStyle.Dash;
-                    graphics.DrawPath(pen, shape);
+                    focusEntities = new HashSet<string>();
+                    focusEdges = new HashSet<string>();
+                    inactiveSameNameNodes = new HashSet<string>();
                 }
-                using (Brush text = new SolidBrush(Color.FromArgb(dim ? 40 : 230, _darkTheme ? Color.FromArgb(215, 224, 233) : Color.FromArgb(45, 57, 70))))
-                    graphics.DrawString(group.label, Font, text, group.x + 12, group.y + 9);
-            }
 
-            foreach (GraphEdge edge in _document.edges)
-            {
-                bool selected = interactive && _selectedType == "edge" && _selectedId == edge.id;
-                bool related = focusEdges.Contains(edge.id);
-                if (focused && !related) continue;
-                float alpha = focused && !related ? 0.08f : 1f;
-                Color color = EdgeSourceColor(edge);
-                using (GraphicsPath path = BuildEdgePath(edge))
-                using (Pen pen = new Pen(Color.FromArgb((int)(255 * alpha), color), (selected || related ? 3f : 1.8f) * unit))
+                foreach (GraphGroup group in GroupsBackToFront())
                 {
-                    pen.StartCap = LineCap.Round; pen.EndCap = LineCap.Round;
-                    graphics.DrawPath(pen, path);
-                    DrawArrow(graphics, path, color, unit, alpha);
-                    if (!String.IsNullOrWhiteSpace(edge.label)) DrawEdgeLabel(graphics, edge.label, path, unit, focused && !related);
+                    RectangleF groupRect = RectOf(group);
+                    if (!IsFiniteRectangle(groupRect)) continue;
+                    if (interactive && !paddedVisible.IntersectsWith(groupRect)) continue;
+                    string key = GraphSerialization.EndpointKey("group", group.id);
+                    bool selected = interactive && _selectedGroups.Contains(group.id);
+                    bool related = focused && focusEntities.Contains(key) && !selected;
+                    bool dim = focused && !focusEntities.Contains(key);
+                    Color border = selected ? Color.FromArgb(76, 139, 245) : related ? Color.FromArgb(74, 190, 126) : (_darkTheme ? Color.FromArgb(101, 116, 130) : Color.FromArgb(155, 166, 178));
+                    using (GraphicsPath shape = RoundRect(groupRect, 12))
+                    {
+                        using (Brush fill = new SolidBrush(Color.FromArgb(dim ? 18 : (_darkTheme ? 100 : 50), _darkTheme ? Color.FromArgb(48, 57, 67) : Color.FromArgb(215, 222, 230)))) graphics.FillPath(fill, shape);
+                        using (Pen pen = new Pen(Color.FromArgb(dim ? 35 : 220, border), (selected || related ? 3f : 1.4f) * unit))
+                        {
+                            if (!selected && !related) pen.DashStyle = DashStyle.Dash;
+                            graphics.DrawPath(pen, shape);
+                        }
+                    }
+                    using (Brush text = new SolidBrush(Color.FromArgb(dim ? 40 : 230, _darkTheme ? Color.FromArgb(215, 224, 233) : Color.FromArgb(45, 57, 70))))
+                        graphics.DrawString(group.label, Font, text, new RectangleF(group.x + 12, group.y + 5, Math.Max(1, group.w - 24), Math.Min(24, Math.Max(1, group.h - 10))), _entityHeaderFormat);
+                }
+
+                foreach (GraphEdge edge in _document.edges)
+                {
+                    bool selected = interactive && _selectedType == "edge" && _selectedId == edge.id;
+                    bool related = focusEdges.Contains(edge.id);
+                    if (focused && !related) continue;
+                    RectangleF sourceRect = GetEndpointRect(edge.sourceType, edge.source), targetRect = GetEndpointRect(edge.targetType, edge.target);
+                    if (!IsFiniteRectangle(sourceRect) || !IsFiniteRectangle(targetRect)) continue;
+                    if (interactive && !EdgeEnvelopeIntersectsVisible(edge, paddedVisible)) continue;
+                    CachedEdgeGeometry geometry = GetEdgeGeometry(edge);
+                    if (interactive && !EdgeIntersectsVisible(edge, geometry.Bounds, paddedVisible, unit)) continue;
+                    float alpha = focused && !related ? 0.08f : 1f;
+                    Color color = EdgeSourceColor(edge);
+                    using (Pen pen = new Pen(Color.FromArgb((int)(255 * alpha), color), (selected || related ? 3f : 1.8f) * unit))
+                    {
+                        pen.StartCap = LineCap.Round; pen.EndCap = LineCap.Round;
+                        graphics.DrawPath(pen, geometry.Path);
+                        DrawArrow(graphics, geometry, color, unit, alpha);
+                        if (!String.IsNullOrWhiteSpace(edge.label)) DrawEdgeLabel(graphics, edge.label, geometry.LabelPoint, unit, focused && !related);
+                    }
+                }
+
+                foreach (GraphNode node in _document.nodes)
+                {
+                    RectangleF nodeRect = RectOf(node);
+                    if (!IsFiniteRectangle(nodeRect)) continue;
+                    if (interactive && !paddedVisible.IntersectsWith(nodeRect)) continue;
+                    string key = GraphSerialization.EndpointKey("node", node.id);
+                    bool selected = interactive && _selectedNodes.Contains(node.id);
+                    bool primary = interactive && _selectedType == "node" && _selectedId == node.id;
+                    bool inactiveSameNameNode = interactive && inactiveSameNameNodes.Contains(node.id);
+                    bool sameNameHighlighted = interactive && HasSelectedNodeName(node) && !inactiveSameNameNode;
+                    bool related = focused && focusEntities.Contains(key) && !primary && !sameNameHighlighted && !inactiveSameNameNode;
+                    bool dim = focused && (!focusEntities.Contains(key) || inactiveSameNameNode);
+                    Color fillColor = _darkTheme ? DarkNodeColor(node.kind) : NodeColor(node.kind);
+                    using (GraphicsPath shape = RoundRect(nodeRect, 9))
+                    {
+                        using (Brush fill = new SolidBrush(Color.FromArgb(dim ? 30 : 235, fillColor))) graphics.FillPath(fill, shape);
+                        Color border = primary || sameNameHighlighted ? Color.FromArgb(76, 139, 245) : related ? Color.FromArgb(74, 190, 126) : (_darkTheme ? Color.FromArgb(125, 140, 154) : Color.FromArgb(105, 119, 133));
+                        using (Pen pen = new Pen(Color.FromArgb(dim ? 40 : 255, border), (primary ? 4f : sameNameHighlighted ? 3.4f : selected || related ? 3f : 1.4f) * unit)) graphics.DrawPath(pen, shape);
+                    }
+                    using (Brush small = new SolidBrush(Color.FromArgb(dim ? 45 : 210, _darkTheme ? Color.FromArgb(190, 201, 211) : Color.FromArgb(50, 62, 75))))
+                        graphics.DrawString(node.type ?? "节点", _nodeTypeFont, small, new RectangleF(node.x + 9, node.y + 2, Math.Max(1, node.w - 18), Math.Min(18, Math.Max(1, node.h - 4))), _entityHeaderFormat);
+                    using (Brush text = new SolidBrush(Color.FromArgb(dim ? 45 : 245, _darkTheme ? Color.FromArgb(242, 245, 248) : Color.FromArgb(25, 35, 48))))
+                        graphics.DrawString(node.label, _nodeLabelFont, text, new RectangleF(node.x + 6, node.y + 17, node.w - 12, node.h - 18), _nodeLabelFormat);
+                }
+
+                if (interactive && EditMode)
+                {
+                    if ((_gesture == CanvasGesture.MoveNodes || _gesture == CanvasGesture.MoveGroup || _gesture == CanvasGesture.MoveSelection) && _gestureMoved) { DrawAlignmentGuides(graphics, unit); DrawEqualSpacingHints(graphics, unit); }
+                    DrawSelectionHandles(graphics, unit);
+                    if (_gesture == CanvasGesture.Link && _gestureMoved) DrawLinkPreview(graphics, unit);
                 }
             }
+            finally { graphics.Restore(state); }
+        }
 
-            foreach (GraphNode node in _document.nodes)
-            {
-                string key = GraphSerialization.EndpointKey("node", node.id);
-                bool selected = interactive && _selectedNodes.Contains(node.id);
-                bool primary = interactive && _selectedType == "node" && _selectedId == node.id;
-                bool inactiveSameNameNode = interactive && IsInactiveSameNameNode(node);
-                bool sameNameHighlighted = interactive && IsSameNameHighlightedNode(node);
-                bool related = focused && focusEntities.Contains(key) && !primary && !sameNameHighlighted && !inactiveSameNameNode;
-                bool dim = focused && (!focusEntities.Contains(key) || inactiveSameNameNode);
-                Color fillColor = _darkTheme ? DarkNodeColor(node.kind) : NodeColor(node.kind);
-                using (GraphicsPath shape = RoundRect(RectOf(node), 9))
-                using (Brush fill = new SolidBrush(Color.FromArgb(dim ? 30 : 235, fillColor))) graphics.FillPath(fill, shape);
-                Color border = primary || sameNameHighlighted ? Color.FromArgb(76, 139, 245) : related ? Color.FromArgb(74, 190, 126) : (_darkTheme ? Color.FromArgb(125, 140, 154) : Color.FromArgb(105, 119, 133));
-                using (Pen pen = new Pen(Color.FromArgb(dim ? 40 : 255, border), (primary ? 4f : sameNameHighlighted ? 3.4f : selected || related ? 3f : 1.4f) * unit))
-                using (GraphicsPath shape = RoundRect(RectOf(node), 9)) graphics.DrawPath(pen, shape);
-                using (Font smallFont = new Font(Font.FontFamily, 7.8f))
-                using (Brush small = new SolidBrush(Color.FromArgb(dim ? 45 : 210, _darkTheme ? Color.FromArgb(190, 201, 211) : Color.FromArgb(50, 62, 75)))) graphics.DrawString(node.type ?? "节点", smallFont, small, node.x + 9, node.y + 5);
-                using (Font labelFont = new Font(Font.FontFamily, 9.2f, FontStyle.Bold))
-                using (StringFormat format = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-                using (Brush text = new SolidBrush(Color.FromArgb(dim ? 45 : 245, _darkTheme ? Color.FromArgb(242, 245, 248) : Color.FromArgb(25, 35, 48))))
-                    graphics.DrawString(node.label, labelFont, text, new RectangleF(node.x + 6, node.y + 17, node.w - 12, node.h - 18), format);
-            }
+        private bool EdgeEnvelopeIntersectsVisible(GraphEdge edge, RectangleF visible)
+        {
+            RectangleF source = GetEndpointRect(edge.sourceType, edge.source), target = GetEndpointRect(edge.targetType, edge.target);
+            if (!IsFiniteRectangle(source) || !IsFiniteRectangle(target) || !IsFiniteRectangle(visible)) return false;
+            RectangleF envelope = RectangleF.Union(source, target);
+            float labelReach = String.IsNullOrWhiteSpace(edge.label) ? 0f : Math.Max(24f, (edge.label.Length + 2) * Font.Size);
+            envelope.Inflate(150f + labelReach, 150f + labelReach);
+            return envelope.IntersectsWith(visible);
+        }
 
-            if (interactive && EditMode)
-            {
-                if ((_gesture == CanvasGesture.MoveNodes || _gesture == CanvasGesture.MoveGroup || _gesture == CanvasGesture.MoveSelection) && _gestureMoved) { DrawAlignmentGuides(graphics, unit); DrawEqualSpacingHints(graphics, unit); }
-                DrawSelectionHandles(graphics, unit);
-                if (_gesture == CanvasGesture.Link && _gestureMoved) DrawLinkPreview(graphics, unit);
-            }
-            graphics.Restore(state);
+        private bool EdgeIntersectsVisible(GraphEdge edge, RectangleF bounds, RectangleF visible, float unit)
+        {
+            if (!HasFiniteRectangleValues(bounds) || !IsFiniteRectangle(visible) || !IsFinite(unit)) return false;
+            RectangleF expanded = bounds;
+            float labelReach = String.IsNullOrWhiteSpace(edge.label) ? 0f : Math.Max(24f, (edge.label.Length + 2) * Font.Size);
+            float margin = Math.Max(2f * unit, labelReach);
+            if (margin > 0) expanded.Inflate(margin, margin);
+            return expanded.IntersectsWith(visible);
         }
 
         private void DrawAlignmentGuides(Graphics graphics, float unit)
@@ -1193,8 +1488,8 @@ namespace RelationshipGraphNative
             using (Pen pen = new Pen(Color.FromArgb(225, 232, 84, 135), 1.4f * unit))
             {
                 pen.DashStyle = DashStyle.Dash;
-                if (!Single.IsNaN(_alignmentGuideX)) graphics.DrawLine(pen, _alignmentGuideX, visible.Top, _alignmentGuideX, visible.Bottom);
-                if (!Single.IsNaN(_alignmentGuideY)) graphics.DrawLine(pen, visible.Left, _alignmentGuideY, visible.Right, _alignmentGuideY);
+                if (IsFinite(_alignmentGuideX)) graphics.DrawLine(pen, _alignmentGuideX, visible.Top, _alignmentGuideX, visible.Bottom);
+                if (IsFinite(_alignmentGuideY)) graphics.DrawLine(pen, visible.Left, _alignmentGuideY, visible.Right, _alignmentGuideY);
             }
         }
 
@@ -1210,7 +1505,6 @@ namespace RelationshipGraphNative
             Color color = Color.FromArgb(235, 38, 174, 112);
             using (Pen pen = new Pen(color, 1.5f * unit))
             using (Brush brush = new SolidBrush(color))
-            using (Font font = new Font(Font.FontFamily, 7.8f, FontStyle.Bold))
             {
                 if (hint.Horizontal)
                 {
@@ -1218,7 +1512,7 @@ namespace RelationshipGraphNative
                     if (y > visible.Bottom - 8f * unit) y = Math.Min(hint.First.Top, Math.Min(hint.Middle.Top, hint.Last.Top)) - 13f * unit;
                     DrawSpacingSegment(graphics, pen, hint.First.Right, hint.Middle.Left, y, true, unit);
                     DrawSpacingSegment(graphics, pen, hint.Middle.Right, hint.Last.Left, y, true, unit);
-                    graphics.DrawString("等距 " + Math.Round(hint.Gap), font, brush, hint.Middle.Right + 4f * unit, y + 3f * unit);
+                    graphics.DrawString("等距 " + Math.Round(hint.Gap), _spacingFont, brush, hint.Middle.Right + 4f * unit, y + 3f * unit);
                 }
                 else
                 {
@@ -1226,7 +1520,7 @@ namespace RelationshipGraphNative
                     if (x > visible.Right - 8f * unit) x = Math.Min(hint.First.Left, Math.Min(hint.Middle.Left, hint.Last.Left)) - 13f * unit;
                     DrawSpacingSegment(graphics, pen, hint.First.Bottom, hint.Middle.Top, x, false, unit);
                     DrawSpacingSegment(graphics, pen, hint.Middle.Bottom, hint.Last.Top, x, false, unit);
-                    graphics.DrawString("等距 " + Math.Round(hint.Gap), font, brush, x + 3f * unit, hint.Middle.Bottom + 4f * unit);
+                    graphics.DrawString("等距 " + Math.Round(hint.Gap), _spacingFont, brush, x + 3f * unit, hint.Middle.Bottom + 4f * unit);
                 }
             }
         }
@@ -1256,6 +1550,7 @@ namespace RelationshipGraphNative
         {
             if (_selectedType != "group" || _selectedGroups.Count != 1 || _selectedNodes.Count != 0 || _selectedId.Length == 0) return;
             RectangleF rect = GetEndpointRect(_selectedType, _selectedId);
+            if (!IsFiniteRectangle(rect)) return;
             if (_selectedType == "group")
             {
                 foreach (KeyValuePair<string, PointF> item in ResizePoints(rect))
@@ -1270,6 +1565,7 @@ namespace RelationshipGraphNative
         private void DrawLinkPreview(Graphics graphics, float unit)
         {
             RectangleF sourceRect = GetEndpointRect(_gestureEntityType, _gestureEntityId);
+            if (!IsFiniteRectangle(sourceRect) || !IsFinite(_worldCurrent.X) || !IsFinite(_worldCurrent.Y)) return;
             EndpointItem target = HitEndpoint(_worldCurrent, _gestureEntityType, _gestureEntityId);
             string sourceSide = _sourceSide;
             PointF end;
@@ -1286,6 +1582,32 @@ namespace RelationshipGraphNative
                 pen.DashStyle = DashStyle.Dash;
                 graphics.DrawLine(pen, start, end);
             }
+        }
+
+        private void GetFocusForDrawing(out HashSet<string> entities, out HashSet<string> edgeIds, out HashSet<string> inactiveSameNameNodes)
+        {
+            if (_gesture != CanvasGesture.None && _gestureFocusEntities != null)
+            {
+                entities = _gestureFocusEntities;
+                edgeIds = _gestureFocusEdges;
+                inactiveSameNameNodes = _gestureInactiveSameNameNodes;
+                return;
+            }
+            ComputeFocus(out entities, out edgeIds);
+            inactiveSameNameNodes = ComputeInactiveSameNameNodeIds();
+            if (_gesture != CanvasGesture.None)
+            {
+                _gestureFocusEntities = entities;
+                _gestureFocusEdges = edgeIds;
+                _gestureInactiveSameNameNodes = inactiveSameNameNodes;
+            }
+        }
+
+        private void ClearGestureFocusCache()
+        {
+            _gestureFocusEntities = null;
+            _gestureFocusEdges = null;
+            _gestureInactiveSameNameNodes = null;
         }
 
         private void ComputeFocus(out HashSet<string> entities, out HashSet<string> edgeIds)
@@ -1352,9 +1674,38 @@ namespace RelationshipGraphNative
 
         private bool IsSameNameHighlightedNode(GraphNode node)
         {
+            return HasSelectedNodeName(node) && !IsInactiveSameNameNode(node);
+        }
+
+        private bool HasSelectedNodeName(GraphNode node)
+        {
             GraphNode selected;
             return node != null && _selectedType == "node" && _selectedNodes.Count == 1 && _nodes.TryGetValue(_selectedId, out selected) &&
-                String.Equals(node.label ?? "", selected.label ?? "", StringComparison.Ordinal) && !IsInactiveSameNameNode(node);
+                String.Equals(node.label ?? "", selected.label ?? "", StringComparison.Ordinal);
+        }
+
+        private HashSet<string> ComputeInactiveSameNameNodeIds()
+        {
+            HashSet<string> inactive = new HashSet<string>(StringComparer.Ordinal);
+            GraphNode selected;
+            if (_selectedType != "node" || _selectedNodes.Count != 1 || !_nodes.TryGetValue(_selectedId, out selected)) return inactive;
+            string direction = String.IsNullOrEmpty(FocusDirection) ? "all" : FocusDirection;
+            if (direction != "upstream" && direction != "downstream") return inactive;
+            HashSet<string> active = new HashSet<string>(StringComparer.Ordinal);
+            foreach (GraphEdge edge in _document.edges)
+            {
+                string sourceKey = GraphSerialization.EndpointKey(edge.sourceType, edge.source);
+                string targetKey = GraphSerialization.EndpointKey(edge.targetType, edge.target);
+                if (sourceKey == targetKey) continue;
+                active.Add(direction == "downstream" ? sourceKey : targetKey);
+            }
+            string selectedLabel = selected.label ?? "";
+            foreach (GraphNode node in _document.nodes)
+            {
+                if (!String.Equals(node.label ?? "", selectedLabel, StringComparison.Ordinal)) continue;
+                if (!active.Contains(GraphSerialization.EndpointKey("node", node.id))) inactive.Add(node.id);
+            }
+            return inactive;
         }
 
         private bool IsInactiveSameNameNode(GraphNode node)
@@ -1381,47 +1732,111 @@ namespace RelationshipGraphNative
         internal HashSet<string> FocusedEntitiesForTesting() { HashSet<string> entities, edges; ComputeFocus(out entities, out edges); return entities; }
         internal HashSet<string> FocusedEdgesForTesting() { HashSet<string> entities, edges; ComputeFocus(out entities, out edges); return edges; }
 
+        private CachedEdgeGeometry GetEdgeGeometry(GraphEdge edge)
+        {
+            RectangleF sourceRect = GetEndpointRect(edge.sourceType, edge.source);
+            RectangleF targetRect = GetEndpointRect(edge.targetType, edge.target);
+            string cacheKey = edge.id ?? "";
+            CachedEdgeGeometry geometry;
+            if (_edgeGeometry.TryGetValue(cacheKey, out geometry) && geometry.Matches(edge, sourceRect, targetRect)) return geometry;
+            if (geometry != null)
+            {
+                _edgeGeometry.Remove(cacheKey);
+                geometry.Dispose();
+            }
+            GraphicsPath path = null;
+            try
+            {
+                path = CreateEdgePath(edge, sourceRect, targetRect);
+                geometry = new CachedEdgeGeometry
+                {
+                    SourceType = edge.sourceType,
+                    SourceId = edge.source,
+                    TargetType = edge.targetType,
+                    TargetId = edge.target,
+                    SourceSide = edge.sourceSide,
+                    TargetSide = edge.targetSide,
+                    LineType = edge.lineType,
+                    SourceRect = sourceRect,
+                    TargetRect = targetRect,
+                    Path = path,
+                    Bounds = path.GetBounds()
+                };
+                PopulateEdgeGeometry(geometry);
+                _edgeGeometry[cacheKey] = geometry;
+                path = null;
+                return geometry;
+            }
+            finally
+            {
+                if (path != null) path.Dispose();
+            }
+        }
+
         private GraphicsPath BuildEdgePath(GraphEdge edge)
         {
             RectangleF sourceRect = GetEndpointRect(edge.sourceType, edge.source);
             RectangleF targetRect = GetEndpointRect(edge.targetType, edge.target);
+            return CreateEdgePath(edge, sourceRect, targetRect);
+        }
+
+        private static GraphicsPath CreateEdgePath(GraphEdge edge, RectangleF sourceRect, RectangleF targetRect)
+        {
             string sourceSide = String.IsNullOrEmpty(edge.sourceSide) ? ConnectionSide(sourceRect, targetRect) : edge.sourceSide;
             string targetSide = String.IsNullOrEmpty(edge.targetSide) ? ConnectionSide(targetRect, sourceRect) : edge.targetSide;
             PointF source = GetPortPoint(sourceRect, sourceSide);
             PointF target = GetPortPoint(targetRect, targetSide);
             GraphicsPath path = new GraphicsPath();
-            if (edge.lineType == "straight") path.AddLine(source, target);
-            else if (edge.lineType == "polyline")
+            try
             {
-                if (sourceSide == "left" || sourceSide == "right")
+                if (edge.lineType == "straight") path.AddLine(source, target);
+                else if (edge.lineType == "polyline")
                 {
-                    float mid = (source.X + target.X) / 2f;
-                    path.AddLines(new[] { source, new PointF(mid, source.Y), new PointF(mid, target.Y), target });
+                    if (sourceSide == "left" || sourceSide == "right")
+                    {
+                        float mid = (source.X + target.X) / 2f;
+                        path.AddLines(new[] { source, new PointF(mid, source.Y), new PointF(mid, target.Y), target });
+                    }
+                    else
+                    {
+                        float mid = (source.Y + target.Y) / 2f;
+                        path.AddLines(new[] { source, new PointF(source.X, mid), new PointF(target.X, mid), target });
+                    }
                 }
                 else
                 {
-                    float mid = (source.Y + target.Y) / 2f;
-                    path.AddLines(new[] { source, new PointF(source.X, mid), new PointF(target.X, mid), target });
+                    PointF sourceVector = SideVector(sourceSide);
+                    PointF targetVector = SideVector(targetSide);
+                    float distance = Math.Max(45f, Math.Min(140f, Distance(source, target) * 0.42f));
+                    path.AddBezier(source, new PointF(source.X + sourceVector.X * distance, source.Y + sourceVector.Y * distance), new PointF(target.X + targetVector.X * distance, target.Y + targetVector.Y * distance), target);
                 }
+                return path;
             }
-            else
+            catch
             {
-                PointF sourceVector = SideVector(sourceSide);
-                PointF targetVector = SideVector(targetSide);
-                float distance = Math.Max(45f, Math.Min(140f, Distance(source, target) * 0.42f));
-                path.AddBezier(source, new PointF(source.X + sourceVector.X * distance, source.Y + sourceVector.Y * distance), new PointF(target.X + targetVector.X * distance, target.Y + targetVector.Y * distance), target);
+                path.Dispose();
+                throw;
             }
-
-            return path;
         }
 
-        private void DrawArrow(Graphics graphics, GraphicsPath path, Color color, float unit, float alpha)
+        private static void PopulateEdgeGeometry(CachedEdgeGeometry geometry)
         {
-            path.Flatten(null, 1.2f);
-            PointF[] points = path.PathPoints;
-            if (points.Length < 2) return;
-            PointF end = points[points.Length - 1];
-            PointF previous = points[points.Length - 2];
+            geometry.LabelPoint = PathPointAtFraction(geometry.Path, .5f);
+            using (GraphicsPath flattened = (GraphicsPath)geometry.Path.Clone())
+            {
+                flattened.Flatten(null, 1.2f);
+                PointF[] points = flattened.PathPoints;
+                if (points.Length < 2) return;
+                geometry.ArrowEnd = points[points.Length - 1];
+                geometry.ArrowPrevious = points[points.Length - 2];
+                geometry.HasArrow = true;
+            }
+        }
+
+        private void DrawArrow(Graphics graphics, CachedEdgeGeometry geometry, Color color, float unit, float alpha)
+        {
+            if (!geometry.HasArrow) return;
+            PointF end = geometry.ArrowEnd, previous = geometry.ArrowPrevious;
             float angle = (float)Math.Atan2(end.Y - previous.Y, end.X - previous.X);
             float size = 8f * unit;
             PointF left = new PointF(end.X - (float)Math.Cos(angle - 0.55) * size, end.Y - (float)Math.Sin(angle - 0.55) * size);
@@ -1429,9 +1844,8 @@ namespace RelationshipGraphNative
             using (Brush brush = new SolidBrush(Color.FromArgb((int)(255 * alpha), color))) graphics.FillPolygon(brush, new[] { end, left, right });
         }
 
-        private void DrawEdgeLabel(Graphics graphics, string label, GraphicsPath path, float unit, bool dim)
+        private void DrawEdgeLabel(Graphics graphics, string label, PointF point, float unit, bool dim)
         {
-            PointF point = PathPointAtFraction(path, .5f);
             SizeF size = graphics.MeasureString(label, Font);
             RectangleF box = new RectangleF(point.X - size.Width / 2 - 4 * unit, point.Y - size.Height / 2 - 2 * unit, size.Width + 8 * unit, size.Height + 4 * unit);
             using (Brush back = new SolidBrush(Color.FromArgb(dim ? 35 : 225, _darkTheme ? Color.FromArgb(25, 31, 38) : Color.White))) graphics.FillRectangle(back, box);
@@ -1466,7 +1880,7 @@ namespace RelationshipGraphNative
 
         internal PointF EdgeLabelPointForTesting(GraphEdge edge)
         {
-            using (GraphicsPath path = BuildEdgePath(edge)) return PathPointAtFraction(path, .5f);
+            return GetEdgeGeometry(edge).LabelPoint;
         }
 
         private RectangleF EdgeLabelEditArea(GraphEdge edge)
@@ -1483,7 +1897,8 @@ namespace RelationshipGraphNative
             handle = "";
             if (_selectedType != "group" || _selectedGroups.Count != 1 || !_groups.ContainsKey(_selectedId)) return false;
             RectangleF rect = RectOf(_groups[_selectedId]);
-            float tolerance = 9f / _zoom;
+            if (!IsFiniteRectangle(rect) || !IsFinite(world.X) || !IsFinite(world.Y)) return false;
+            float tolerance = 9f / SafeZoom(_zoom);
             foreach (KeyValuePair<string, PointF> point in ResizePoints(rect))
             {
                 if (Distance(world, point.Value) <= tolerance) { handle = point.Key; return true; }
@@ -1535,12 +1950,39 @@ namespace RelationshipGraphNative
 
         private GraphEdge HitEdge(PointF world)
         {
-            for (int i = _document.edges.Count - 1; i >= 0; i--)
+            if (!IsFinite(world.X) || !IsFinite(world.Y)) return null;
+            float zoom = SafeZoom(_zoom), offsetX = ClampViewOffset(_offsetX), offsetY = ClampViewOffset(_offsetY);
+            float tolerance = 12f / zoom;
+            PointF screen = new PointF(world.X * zoom + offsetX, world.Y * zoom + offsetY);
+            using (Pen pen = new Pen(Color.Black, 12f))
+            using (Matrix transform = new Matrix(zoom, 0f, 0f, zoom, offsetX, offsetY))
             {
-                using (GraphicsPath path = BuildEdgePath(_document.edges[i]))
-                using (Pen pen = new Pen(Color.Black, 12f / _zoom)) if (path.IsOutlineVisible(world, pen)) return _document.edges[i];
+                for (int i = _document.edges.Count - 1; i >= 0; i--)
+                {
+                    GraphEdge edge = _document.edges[i];
+                    RectangleF source = GetEndpointRect(edge.sourceType, edge.source), target = GetEndpointRect(edge.targetType, edge.target);
+                    if (!IsFiniteRectangle(source) || !IsFiniteRectangle(target)) continue;
+                    RectangleF envelope = RectangleF.Union(source, target);
+                    envelope.Inflate(150f + tolerance, 150f + tolerance);
+                    if (!envelope.Contains(world)) continue;
+                    CachedEdgeGeometry geometry = GetEdgeGeometry(edge);
+                    RectangleF bounds = geometry.Bounds;
+                    bounds.Inflate(tolerance, tolerance);
+                    if (!bounds.Contains(world)) continue;
+                    using (GraphicsPath screenPath = (GraphicsPath)geometry.Path.Clone())
+                    {
+                        screenPath.Transform(transform);
+                        if (screenPath.IsOutlineVisible(screen, pen)) return edge;
+                    }
+                }
             }
             return null;
+        }
+
+        internal string HitEdgeIdForTesting(PointF world)
+        {
+            GraphEdge edge = HitEdge(world);
+            return edge == null ? "" : edge.id;
         }
 
         private EndpointItem HitEndpoint(PointF world, string excludedType, string excludedId)
@@ -1557,7 +1999,9 @@ namespace RelationshipGraphNative
 
         private IEnumerable<GraphGroup> GroupsBackToFront()
         {
-            return _document.groups.OrderByDescending(delegate(GraphGroup group) { return group.w * group.h; });
+            if (_groupDrawOrder == null)
+                _groupDrawOrder = _document.groups.OrderByDescending(delegate(GraphGroup group) { return group.w * group.h; }).ToList();
+            return _groupDrawOrder;
         }
 
         internal string[] GroupDrawOrderForTesting() { return GroupsBackToFront().Select(delegate(GraphGroup group) { return group.id; }).ToArray(); }
@@ -1566,6 +2010,10 @@ namespace RelationshipGraphNative
 
         private void RebuildIndexes()
         {
+            ClearEdgeGeometryCache();
+            _groupDrawOrder = null;
+            _alignmentCandidates.Clear();
+            ClearGestureFocusCache();
             _nodes.Clear(); _groups.Clear();
             foreach (GraphNode node in _document.nodes) _nodes[node.id] = node;
             foreach (GraphGroup group in _document.groups) _groups[group.id] = group;
@@ -1578,7 +2026,7 @@ namespace RelationshipGraphNative
             foreach (GraphEdge edge in _document.edges)
             {
                 RectangleF sourceRect = GetEndpointRect(edge.sourceType, edge.source), targetRect = GetEndpointRect(edge.targetType, edge.target);
-                if (sourceRect.IsEmpty || targetRect.IsEmpty) continue;
+                if (!IsFiniteRectangle(sourceRect) || !IsFiniteRectangle(targetRect)) continue;
                 edge.sourceSide = ConnectionSide(sourceRect, targetRect);
                 edge.targetSide = ConnectionSide(targetRect, sourceRect);
             }
@@ -1647,18 +2095,28 @@ namespace RelationshipGraphNative
             foreach (GraphEdge edge in _document.edges)
             {
                 RectangleF source = GetEndpointRect(edge.sourceType, edge.source), target = GetEndpointRect(edge.targetType, edge.target);
-                if (source.IsEmpty || target.IsEmpty) continue;
-                using (GraphicsPath path = BuildEdgePath(edge)) IncludeBounds(ref bounds, ref hasContent, path.GetBounds());
+                if (!IsFiniteRectangle(source) || !IsFiniteRectangle(target)) continue;
+                IncludeBounds(ref bounds, ref hasContent, GetEdgeGeometry(edge).Bounds);
             }
-            if (!hasContent) bounds = new RectangleF(0, 0, _document.meta.canvasWidth, _document.meta.canvasHeight);
-            if (padding > 0) bounds.Inflate(padding, padding);
+            if (!hasContent) bounds = DefaultContentBounds();
+            if (IsFinite(padding) && padding > 0) bounds.Inflate(Math.Min(padding, GraphSerialization.MaxItemDimension), Math.Min(padding, GraphSerialization.MaxItemDimension));
+            if (!IsFiniteRectangle(bounds)) bounds = DefaultContentBounds();
             return new RectangleF(bounds.X, bounds.Y, Math.Max(1, bounds.Width), Math.Max(1, bounds.Height));
+        }
+
+        private RectangleF DefaultContentBounds()
+        {
+            float width = _document != null && _document.meta != null && IsFinite(_document.meta.canvasWidth) && _document.meta.canvasWidth > 0 ? _document.meta.canvasWidth : 1200f;
+            float height = _document != null && _document.meta != null && IsFinite(_document.meta.canvasHeight) && _document.meta.canvasHeight > 0 ? _document.meta.canvasHeight : 760f;
+            return new RectangleF(0, 0, Math.Min(width, GraphSerialization.MaxItemDimension), Math.Min(height, GraphSerialization.MaxItemDimension));
         }
 
         private static void IncludeBounds(ref RectangleF bounds, ref bool hasContent, RectangleF item)
         {
-            if (item.Width <= 0 || item.Height <= 0) return;
-            bounds = hasContent ? RectangleF.Union(bounds, item) : item;
+            if (!IsFiniteRectangle(item)) return;
+            RectangleF combined = hasContent ? RectangleF.Union(bounds, item) : item;
+            if (!IsFiniteRectangle(combined)) return;
+            bounds = combined;
             hasContent = true;
         }
 
@@ -1666,10 +2124,21 @@ namespace RelationshipGraphNative
 
         private RectangleF VisibleWorldRectangle()
         {
-            return new RectangleF(-_offsetX / _zoom, -_offsetY / _zoom, ClientSize.Width / _zoom, ClientSize.Height / _zoom);
+            return VisibleWorldRectangle(_zoom, _offsetX, _offsetY);
         }
 
-        private PointF ScreenToWorld(Point point) { return new PointF((point.X - _offsetX) / _zoom, (point.Y - _offsetY) / _zoom); }
+        private RectangleF VisibleWorldRectangle(float zoom, float offsetX, float offsetY)
+        {
+            float safeZoom = SafeZoom(zoom);
+            float safeOffsetX = ClampViewOffset(offsetX), safeOffsetY = ClampViewOffset(offsetY);
+            return new RectangleF(-safeOffsetX / safeZoom, -safeOffsetY / safeZoom, ClientSize.Width / safeZoom, ClientSize.Height / safeZoom);
+        }
+
+        private PointF ScreenToWorld(Point point)
+        {
+            float zoom = SafeZoom(_zoom), offsetX = ClampViewOffset(_offsetX), offsetY = ClampViewOffset(_offsetY);
+            return new PointF((point.X - offsetX) / zoom, (point.Y - offsetY) / zoom);
+        }
         private RectangleF ScreenRectangleToWorld(Rectangle rect)
         {
             PointF start = ScreenToWorld(rect.Location), end = ScreenToWorld(new Point(rect.Right, rect.Bottom));
@@ -1678,6 +2147,32 @@ namespace RelationshipGraphNative
         private static Rectangle NormalizeRectangle(Point a, Point b) { return Rectangle.FromLTRB(Math.Min(a.X, b.X), Math.Min(a.Y, b.Y), Math.Max(a.X, b.X), Math.Max(a.Y, b.Y)); }
         private static RectangleF RectOf(GraphNode node) { return new RectangleF(node.x, node.y, node.w, node.h); }
         private static RectangleF RectOf(GraphGroup group) { return new RectangleF(group.x, group.y, group.w, group.h); }
+        private static bool IsFinite(float value) { return !Single.IsNaN(value) && !Single.IsInfinity(value); }
+        private static bool IsFiniteRectangle(RectangleF rect)
+        {
+            return HasFiniteRectangleValues(rect) && rect.Width > 0 && rect.Height > 0;
+        }
+        private static bool HasFiniteRectangleValues(RectangleF rect) { return IsFinite(rect.X) && IsFinite(rect.Y) && IsFinite(rect.Width) && IsFinite(rect.Height); }
+        private static float SafeZoom(float value)
+        {
+            if (!IsFinite(value) || value <= 0) return 1f;
+            return Math.Max(MinimumSafeZoom, Math.Min(MaximumZoom, value));
+        }
+        private static float ClampViewOffset(double value)
+        {
+            if (Double.IsNaN(value) || Double.IsInfinity(value)) return 0f;
+            return (float)Math.Max(-MaximumViewOffset, Math.Min(MaximumViewOffset, value));
+        }
+        private static float ClampWorldCoordinate(double value)
+        {
+            if (Double.IsNaN(value) || Double.IsInfinity(value)) return 0f;
+            return (float)Math.Max(-GraphSerialization.MaxCoordinate, Math.Min(GraphSerialization.MaxCoordinate, value));
+        }
+        private static float ClampItemDimension(double value, float minimum)
+        {
+            if (Double.IsNaN(value) || Double.IsInfinity(value)) return minimum;
+            return (float)Math.Max(minimum, Math.Min(GraphSerialization.MaxItemDimension, value));
+        }
         private static RectangleF NodeTypeEditArea(GraphNode node)
         {
             float width = Math.Min(node.w - 12, Math.Max(48, (node.type ?? "节点").Length * 13 + 18));
@@ -1747,6 +2242,10 @@ namespace RelationshipGraphNative
             path.AddArc(rect.Left, rect.Top, diameter, diameter, 180, 90); path.AddArc(rect.Right - diameter, rect.Top, diameter, diameter, 270, 90);
             path.AddArc(rect.Right - diameter, rect.Bottom - diameter, diameter, diameter, 0, 90); path.AddArc(rect.Left, rect.Bottom - diameter, diameter, diameter, 90, 90); path.CloseFigure(); return path;
         }
-        private void RaiseSelectionChanged() { if (SelectionChanged != null) SelectionChanged(this, EventArgs.Empty); }
+        private void RaiseSelectionChanged()
+        {
+            ClearGestureFocusCache();
+            if (SelectionChanged != null) SelectionChanged(this, EventArgs.Empty);
+        }
     }
 }

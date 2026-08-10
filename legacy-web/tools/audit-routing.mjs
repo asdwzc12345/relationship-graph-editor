@@ -4,7 +4,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const toolDirectory = path.dirname(fileURLToPath(import.meta.url));
 const projectDirectory = path.dirname(toolDirectory);
-const graph = JSON.parse(fs.readFileSync(path.join(projectDirectory, 'system-function-graph.json'), 'utf8'));
+const repositoryRoot = path.dirname(projectDirectory);
+const graph = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'system-function-graph.json'), 'utf8'));
 await import(pathToFileURL(path.join(projectDirectory, 'routing-core.js')).href);
 
 const routing = globalThis.GraphRouting;
@@ -227,7 +228,10 @@ sampledRoutes.forEach(route => {
 
 const curveCount = sampledRoutes.filter(route => route.route.d.includes(' C ')).length;
 const polylineCount = sampledRoutes.length - curveCount;
-if (!curveCount || !polylineCount) issues.push('深度三路线未同时包含曲线与折线');
+const expectsCurves = focusEdges.some(edge => !edge.lineType || String(edge.lineType).toLowerCase() === 'curve');
+const expectsLinearRoutes = focusEdges.some(edge => ['straight', 'polyline'].includes(String(edge.lineType || '').toLowerCase()));
+if (expectsCurves && !curveCount) issues.push('深度三路线缺少默认曲线路径');
+if (expectsLinearRoutes && !polylineCount) issues.push('深度三路线缺少已声明的直线或折线路径');
 if (elapsedMs > 15000) issues.push(`布线耗时过长：${elapsedMs}ms`);
 
 const summary = {

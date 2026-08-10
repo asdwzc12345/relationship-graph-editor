@@ -11,8 +11,8 @@ using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyCompany("Relationship Studio")]
 [assembly: System.Reflection.AssemblyProduct("关系图编辑器")]
 [assembly: System.Reflection.AssemblyCopyright("Copyright © 2026")]
-[assembly: System.Reflection.AssemblyVersion("4.3.2.0")]
-[assembly: System.Reflection.AssemblyFileVersion("4.3.2.0")]
+[assembly: System.Reflection.AssemblyVersion("4.4.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("4.4.0.0")]
 
 namespace RelationshipGraphNative
 {
@@ -57,6 +57,14 @@ namespace RelationshipGraphNative
 
                 GraphDocument roundTrip = GraphSerialization.Deserialize(GraphSerialization.Serialize(graph, false));
                 Require(roundTrip.nodes.Count == graph.nodes.Count && roundTrip.edges.Count == graph.edges.Count, "JSON 往返失败");
+                GraphHistory history = new GraphHistory();
+                for (int historyIndex = 0; historyIndex < 70; historyIndex++)
+                {
+                    GraphDocument snapshot = GraphSerialization.Clone(graph); snapshot.meta.title = "历史 " + historyIndex;
+                    history.Push(snapshot);
+                }
+                Require(history.Count <= 60 && history.StoredCharactersForTesting <= 16 * 1024 * 1024, "撤销历史没有按数量和内存预算收敛");
+                Require(history.Pop().meta.title == "历史 69", "撤销历史顺序错误");
                 GraphDocument blank = GraphSerialization.CreateBlank("空白图");
                 Require(blank.groups.Count == 0 && blank.nodes.Count == 0, "无分组空白图失败");
 
@@ -70,6 +78,28 @@ namespace RelationshipGraphNative
 
                 tempFolder = Path.Combine(Path.GetTempPath(), "relationship-graph-native-" + Guid.NewGuid().ToString("N"));
                 Directory.CreateDirectory(tempFolder);
+                string atomicPath = Path.Combine(tempFolder, "atomic-save.json");
+                NativePersistence.WriteAllTextAtomic(atomicPath, "first", new UTF8Encoding(false), true);
+                NativePersistence.WriteAllTextAtomic(atomicPath, "second", new UTF8Encoding(false), true);
+                Require(File.ReadAllText(atomicPath, Encoding.UTF8) == "second" && File.ReadAllText(atomicPath + ".bak", Encoding.UTF8) == "first", "原子保存或备份失败");
+                bool interruptedWriteFailed = false;
+                try
+                {
+                    NativePersistence.WriteStreamAtomic(atomicPath, true, delegate(Stream stream)
+                    {
+                        byte[] partial = Encoding.UTF8.GetBytes("partial"); stream.Write(partial, 0, partial.Length);
+                        throw new IOException("simulated interruption");
+                    });
+                }
+                catch (IOException) { interruptedWriteFailed = true; }
+                Require(interruptedWriteFailed && File.ReadAllText(atomicPath, Encoding.UTF8) == "second", "写入中断破坏了原文件");
+                Require(Directory.GetFiles(tempFolder, ".atomic-save.json.*.tmp").Length == 0, "原子保存残留临时文件");
+
+                AutosaveStore autosaveStore = new AutosaveStore(Path.Combine(tempFolder, "recovery", "autosave.json"));
+                Require(autosaveStore.Save(GraphSerialization.Serialize(graph, false)).Length == 0, "自动恢复主文件保存失败");
+                Require(autosaveStore.GetRecoveryCandidates().Count >= 2, "自动恢复没有生成主文件和历史版本");
+                autosaveStore.ClearAll();
+                Require(autosaveStore.GetRecoveryCandidates().Count == 0 && !Directory.Exists(autosaveStore.HistoryDirectory), "放弃修改后自动恢复数据未清理干净");
                 string htmlPath = Path.Combine(tempFolder, "readonly.html");
                 NativeExport.SaveReadonlyHtml(graph, htmlPath);
                 GraphDocument imported = GraphSerialization.LoadFile(htmlPath);
@@ -109,7 +139,10 @@ namespace RelationshipGraphNative
                 }
                 byte[] png = File.ReadAllBytes(pngPath), pdf = File.ReadAllBytes(pdfPath);
                 Require(png.Length > 10000 && png[0] == 0x89 && png[1] == 0x50, "PNG 导出失败");
-                Require(pdf.Length > 10000 && pdf[0] == 0x25 && pdf[1] == 0x50 && pdf[2] == 0x44 && pdf[3] == 0x46, "PDF 导出失败");
+                Require(pdf.Length > 1000 && pdf[0] == 0x25 && pdf[1] == 0x50 && pdf[2] == 0x44 && pdf[3] == 0x46, "PDF 导出失败");
+                string pdfStructure = Encoding.GetEncoding(1252).GetString(pdf);
+                Require(!pdfStructure.Contains("/Subtype /Image") && pdfStructure.Contains("/Contents"), "PDF 仍然是位图封装，而不是矢量图形");
+                Require(pdfStructure.Contains("/Filter /FlateDecode") && pdfStructure.Contains("/Length 5 0 R"), "PDF 矢量内容流没有使用完整的流式压缩结构");
 
                 using (GraphCanvas blankCanvas = new GraphCanvas())
                 {
@@ -176,9 +209,17 @@ namespace RelationshipGraphNative
                     window.CanvasForTesting.SelectEntity("node", windowGraph.nodes[0].id);
                     Require(window.EditModeForTesting, "主程序启动后未默认进入编辑状态");
                     Require(window.InspectorEditableForTesting, "主程序右侧属性未直接开放编辑");
+                    Require(window.InspectorTextVisibleForTesting, "高 DPI 下右侧属性文字仍有遮挡");
                     Require(!window.InspectorHasApplyButtonForTesting, "右侧属性中仍存在应用按钮");
                     Require(window.ColorCategoryExamplesForTesting, "颜色分类未同时提供色块和颜色文字");
+                    string savedNodeName = windowGraph.nodes[0].label;
                     Require(window.SetSelectedNodeNameThroughInspectorForTesting("自动应用名称"), "右侧输入内容未自动应用到节点");
+                    Require(window.DirtyForTesting, "修改关系图后未显示未保存状态");
+                    window.UndoForTesting();
+                    Require(!window.DirtyForTesting && window.CanvasForTesting.Document.nodes[0].label == savedNodeName, "撤销回保存点后未清除未保存状态");
+                    window.RedoForTesting();
+                    Require(window.DirtyForTesting && window.CanvasForTesting.Document.nodes[0].label == "自动应用名称", "重做后未恢复未保存状态");
+                    windowGraph = window.CanvasForTesting.Document;
                     Require(!window.CanvasForTesting.LinkHandlesVisibleForSelectionForTesting, "选中节点后仍显示四个连线圆圈");
                     window.CanvasForTesting.SelectEntity("group", windowGraph.groups[0].id);
                     Require(!window.CanvasForTesting.LinkHandlesVisibleForSelectionForTesting, "选中分组后仍显示四个连线圆圈");
@@ -194,7 +235,7 @@ namespace RelationshipGraphNative
                     Require(windowGraph.nodes.Count == nodeCount + 1 && windowGraph.nodes[windowGraph.nodes.Count - 1].group == windowGraph.groups[0].id, "双击位置创建节点或自动归组失败");
                     SplitContainer splitter = null;
                     foreach (Control control in window.Controls) if (control is SplitContainer) { splitter = (SplitContainer)control; break; }
-                    Require(splitter != null && splitter.Panel1MinSize == 600 && splitter.Panel2MinSize == 270, "主窗口分栏未完成安全布局");
+                    Require(splitter != null && splitter.Panel1MinSize == 600 && splitter.Panel2MinSize == 360, "主窗口分栏未完成宽松布局");
                     Require(splitter.SplitterDistance >= splitter.Panel1MinSize && splitter.SplitterDistance <= splitter.ClientSize.Width - splitter.Panel2MinSize - splitter.SplitterWidth, "主窗口分隔位置超出安全范围");
                 }
 
@@ -582,13 +623,48 @@ namespace RelationshipGraphNative
                 string infiniteSvg = NativeExport.BuildSvg(infiniteGraph);
                 Require(infiniteSvg.Contains("viewBox=\"-") && !infiniteSvg.Contains("viewBox=\"0 0 1380 760\""), "SVG still uses a fixed canvas boundary");
 
+                GraphDocument extremeGraph = GraphSerialization.CreateBlank("extreme fit test");
+                extremeGraph.nodes.Add(new GraphNode { id = "extreme_left", label = "left", type = "test", kind = "system", group = "", x = -50000000f, y = 0, w = 150, h = 55 });
+                extremeGraph.nodes.Add(new GraphNode { id = "extreme_right", label = "right", type = "test", kind = "resource", group = "", x = 50000000f, y = 0, w = 150, h = 55 });
+                extremeGraph.edges.Add(new GraphEdge { id = "extreme_edge", source = "extreme_left", target = "extreme_right", sourceType = "node", targetType = "node", sourceSide = "right", targetSide = "left", lineType = "straight", category = "core", label = "" });
+                extremeGraph = GraphSerialization.Normalize(extremeGraph);
+                using (GraphCanvas extremeCanvas = new GraphCanvas())
+                {
+                    extremeCanvas.Size = new System.Drawing.Size(900, 650); extremeCanvas.Document = extremeGraph; extremeCanvas.FitToView();
+                    Require(extremeCanvas.Zoom < .00001f && extremeCanvas.Zoom >= .00000001f, "亿级坐标跨度未使用安全的极小缩放");
+                    Require(extremeCanvas.HitEdgeIdForTesting(new System.Drawing.PointF(75f, 27.5f)) == "extreme_edge", "极小缩放下关系线命中失败");
+                }
+                GraphDocument unsafeCoordinateGraph = GraphSerialization.CreateBlank("unsafe coordinate test");
+                unsafeCoordinateGraph.nodes.Add(new GraphNode { id = "unsafe", label = "unsafe", type = "test", kind = "system", group = "", x = Single.MaxValue, y = Single.MinValue, w = 150, h = 55 });
+                unsafeCoordinateGraph = GraphSerialization.Normalize(unsafeCoordinateGraph);
+                Require(unsafeCoordinateGraph.nodes[0].x == GraphSerialization.MaxCoordinate && unsafeCoordinateGraph.nodes[0].y == -GraphSerialization.MaxCoordinate, "超出安全绘制范围的有限坐标未收敛");
+
+                GraphDocument maximumGraph = GraphSerialization.CreateBlank("maximum graph smoke test");
+                for (int nodeIndex = 0; nodeIndex < GraphSerialization.MaxNodes; nodeIndex++)
+                    maximumGraph.nodes.Add(new GraphNode { id = "max_node_" + nodeIndex, label = "N" + nodeIndex, type = "test", kind = "system", group = "", x = (nodeIndex % 50) * 220f, y = (nodeIndex / 50) * 110f, w = 150, h = 55 });
+                for (int edgeIndex = 0; edgeIndex < GraphSerialization.MaxEdges; edgeIndex++)
+                {
+                    int sourceIndex = edgeIndex / 5, targetIndex = (sourceIndex + edgeIndex % 5 + 1) % GraphSerialization.MaxNodes;
+                    maximumGraph.edges.Add(new GraphEdge { id = "max_edge_" + edgeIndex, source = "max_node_" + sourceIndex, target = "max_node_" + targetIndex, sourceType = "node", targetType = "node", lineType = edgeIndex % 3 == 0 ? "curve" : edgeIndex % 3 == 1 ? "straight" : "polyline", category = "core", label = "" });
+                }
+                maximumGraph = GraphSerialization.Normalize(maximumGraph);
+                System.Diagnostics.Stopwatch maximumGraphTimer = System.Diagnostics.Stopwatch.StartNew();
+                using (GraphCanvas maximumCanvas = new GraphCanvas())
+                using (System.Drawing.Bitmap maximumFrame = new System.Drawing.Bitmap(900, 650))
+                {
+                    maximumCanvas.Size = new System.Drawing.Size(900, 650); maximumCanvas.Document = maximumGraph;
+                    maximumCanvas.DrawToBitmap(maximumFrame, new System.Drawing.Rectangle(0, 0, maximumFrame.Width, maximumFrame.Height));
+                }
+                maximumGraphTimer.Stop();
+                Require(maximumGraphTimer.Elapsed < TimeSpan.FromSeconds(15), "最大规模关系图首次绘制超过 15 秒");
+
                 string folder = Path.GetDirectoryName(Path.GetFullPath(reportPath));
                 if (!Directory.Exists(folder)) Directory.CreateDirectory(folder);
                 Require(Array.IndexOf(System.Reflection.Assembly.GetExecutingAssembly().GetManifestResourceNames(), "RelationshipGraphNative.Assets.app-icon.ico") >= 0, "程序图标未嵌入 EXE");
                 Require(!MainForm.ShouldDeleteSelectionForTesting(Keys.Back, false), "Backspace 仍会删除节点");
                 Require(!MainForm.ShouldDeleteSelectionForTesting(Keys.Delete, true), "文字输入时 Delete 仍会删除节点");
                 Require(MainForm.ShouldDeleteSelectionForTesting(Keys.Delete, false), "画布 Delete 删除功能失效");
-                File.WriteAllText(reportPath, "{\"ok\":true,\"version\":\"4.3.2\",\"groups\":4,\"nodes\":12,\"edges\":12,\"runtime\":\"native-winforms\"}", new UTF8Encoding(false));
+                File.WriteAllText(reportPath, "{\"ok\":true,\"version\":\"4.4.0\",\"groups\":4,\"nodes\":12,\"edges\":12,\"runtime\":\"native-winforms\"}", new UTF8Encoding(false));
                 return 0;
             }
             catch (Exception error)

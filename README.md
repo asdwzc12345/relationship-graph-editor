@@ -1,6 +1,6 @@
-# 关系图编辑器 2.0
+# 关系图编辑器
 
-这是一个纯原生 Windows 桌面关系图编辑器。2.0 版使用 C#、WinForms 和 GDI+ 重写：程序直接创建标准 Windows 窗口，不启动浏览器，不监听本地端口，也不加载 HTML、CSS 或 JavaScript 作为运行界面。
+这是一个纯原生 Windows 桌面关系图编辑器。自 2.0 版起使用 C#、WinForms 和 GDI+：程序直接创建标准 Windows 窗口，不启动浏览器，不监听本地端口，也不加载 HTML、CSS 或 JavaScript 作为运行界面。
 
 ## 直接使用与分享
 
@@ -38,8 +38,10 @@
 - 框选或选中节点、分组后点击“＋分组”，程序会按全部选中内容的整体边界自动创建大小合适的外层分组，并预留标题区和四周边距；选中的已有分组会自动成为新分组的子分组。
 - 撤销和重做只恢复关系图内容，保持当前画布缩放比例和视野位置不变。
 - 支持多选、复制粘贴、撤销、重做、查找、缩放和右键平移。
-- 画布理论无限，可向任意方向平移、创建和摆放节点或分组；“适合窗口”和所有图形导出会自动取当前全部内容范围。
-- 自动保存在 `%LocalAppData%\Relationship Studio\autosave-native.json`。
+- 画布不受默认尺寸边界限制，可向任意方向平移、创建和摆放节点或分组；“适合窗口”和所有图形导出会自动取当前全部内容范围。
+- 新建、恢复默认、导入或关闭前会保护尚未写入 JSON 的修改，可选择保存、不保存或取消操作。
+- JSON 与所有导出文件采用同目录原子写入；再次保存 JSON 时保留上一版 `.bak`，写入中断不会破坏原文件。
+- 自动恢复主文件位于 `%LocalAppData%\Relationship Studio\autosave-native.json`，同时保留 `.bak` 和最多 10 个节流历史版本；主文件损坏时会依次尝试恢复。
 
 ## 文件兼容
 
@@ -53,7 +55,7 @@
 - JSON：可继续编辑的数据文件；
 - 飞书画板文件（`.drawio`）：在飞书桌面端画板中导入后，节点、分组和连线均为独立可编辑对象，每个节点可单独移动；
 - 只读 HTML：用于分享和交互浏览，支持跟随系统/浅色/深色主题、显示或隐藏连线、左键点击对象查看相关关系、右键清除或拖动画布、滚轮和按钮缩放，也可重新导入本工具；
-- SVG、PNG 和 PDF。
+- SVG、PNG 和 PDF；PDF 使用矢量图形和文字轮廓，放大后仍保持清晰。
 
 HTML 在 2.0 中只是一种可选的分享文件格式，不再是软件的运行底层。
 
@@ -100,7 +102,17 @@ HTML 在 2.0 中只是一种可选的分享文件格式，不再是软件的运�
 npm run build:desktop
 ```
 
-构建脚本调用 Windows 自带的 C# 编译器，将 `native` 目录中的源码、默认关系图和程序图标打包为根目录下的单个 `关系图编辑器.exe`。旧版网页源码仍保留用于历史参考，但不会被编译或嵌入 EXE。
+构建脚本调用 Windows 自带的 C# 编译器，将 `native` 目录中的全部 C# 源码、根目录的默认关系图和程序图标打包为根目录下的单个 `关系图编辑器.exe`。构建会嵌入 `desktop/app.manifest`，声明 Windows 10/11 兼容性和 Per-Monitor V2，并启用 WinForms 的 DPI 自动缩放基础设置；正式发布前仍应在不同缩放比例的多显示器环境中验证动态缩放。默认构建不签名。
+
+发布时可选用 Windows 证书存储中的代码签名证书。传入 SHA-1 证书指纹后，脚本才会查找 `signtool.exe`、签名并验证结果；时间戳地址可以替换或留空：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File desktop/build-desktop.ps1 `
+  -CertificateThumbprint "你的证书指纹" `
+  -TimestampUrl "https://timestamp.digicert.com"
+```
+
+证书位于本机计算机证书存储时追加 `-UseMachineCertificateStore`；Windows SDK 不在常规位置时可传入 `-SignToolPath`。仓库不附带证书，也不会伪造或自动申请签名。
 
 运行完整原生自检：
 
@@ -108,15 +120,32 @@ npm run build:desktop
 npm test
 ```
 
-自检会重新构建 EXE，将它复制到一个隔离的临时文件夹中运行，并验证默认图、JSON 往返、只读可视图导入、SVG 输出以及单文件独立性。
+自检会重新构建 EXE，将它复制到一个隔离的临时文件夹中运行，并验证默认图、JSON 往返、原子保存与恢复、只读可视图导入、SVG/PNG/矢量 PDF 输出、画布交互以及单文件独立性。
+
+只运行不覆盖 EXE 的原生静态审计：
+
+```powershell
+npm run audit
+```
 
 ## 原生源码结构
 
 - `native/GraphModel.cs`：数据模型、校验、JSON 与只读文件导入。
 - `native/GraphCanvas.cs`：GDI+ 画布、绘制、命中检测和鼠标交互。
 - `native/MainForm.cs`：标准桌面菜单、工具栏、属性面板和文件操作。
-- `native/NativeExport.cs`：飞书画板、只读 HTML、SVG、PNG、PDF 和 JSON 导出。
+- `native/GraphHistory.cs`：有数量和内存预算的撤销/重做快照。
+- `native/NativePersistence.cs`：原子写入、备份和滚动自动恢复。
+- `native/NativeExport.cs` 与 `native/NativePdfExport.cs`：飞书画板、只读 HTML、SVG、PNG、矢量 PDF 和 JSON 导出。
 - `native/Program.cs`：程序入口、版本信息和独立自检。
 - `desktop/build-desktop.ps1`：单 EXE 构建脚本。
+- `desktop/app.manifest`：高 DPI、Windows 兼容性和执行权限声明。
+- `system-function-graph.json`：原生默认图的唯一数据源。
+- `tools/test-native-desktop.mjs`：原生静态约束与独立 EXE 自检入口。
 
-当前版本：`4.3.2`。
+## 旧网页版本
+
+历史网页实现、旧浏览器启动器、专属检查和测试样例统一位于 `legacy-web/`，不参与当前原生发布。它仍可作为普通静态网页打开；根目录的 `system-function-graph.json` 仍是默认图的唯一数据源，修改后运行 `npm run legacy:sync-default` 重新生成旧网页使用的数据镜像。
+
+旧版检查全部使用 `legacy:*` 命名，例如 `npm run legacy:audit`、`npm run legacy:audit:routing` 和 `npm run legacy:test:store`，不会被默认的 `npm test` 或 `npm run audit` 调用。
+
+当前版本：`4.4.0`。

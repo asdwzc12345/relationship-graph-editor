@@ -13,10 +13,10 @@ const html = read('index.html');
 const css = read('app.css');
 const app = read('app.js');
 const launcherSource = read('desktop/RelationshipGraphLauncher.cs');
-const packageJson = JSON.parse(read('package.json'));
-const buildScript = read('desktop/build-desktop.ps1');
-const executablePath = path.join(projectDirectory, '关系图编辑器.exe');
-const iconPath = path.join(projectDirectory, 'assets', 'app-icon.ico');
+const executablePath = process.env.RELATIONSHIP_GRAPH_LEGACY_EXE
+  ? path.resolve(process.env.RELATIONSHIP_GRAPH_LEGACY_EXE)
+  : '';
+const iconPath = path.join(projectDirectory, 'assets', 'app-icon.svg');
 const embeddedResourceFiles = [
   'index.html',
   'app.css',
@@ -62,33 +62,29 @@ expectText(launcherSource, 'X-Content-Type-Options: nosniff', '桌面本地服�
 expectText(launcherSource, 'Content-Security-Policy:', '桌面本地服务缺少内容安全策略');
 expectText(launcherSource, 'IsAllowedLocalOrigin(headers)', '桌面内部控制端点缺少来源校验');
 expectText(launcherSource, 'GetManifestResourceStream', '桌面程序没有从 EXE 读取内嵌界面资源');
-expectText(buildScript, '/resource:', '桌面构建没有把界面资源嵌入 EXE');
 if (launcherSource.includes('File.Exists(entryFile)')) issues.push('桌面程序仍依赖同目录 index.html');
+embeddedResourceFiles
+  .filter(file => !fs.existsSync(path.join(projectDirectory, file)))
+  .forEach(file => issues.push(`旧版网页缺少资源：${file}`));
 
-if (packageJson.version !== '1.3.9') issues.push('桌面程序版本号不是 1.3.9');
-if (!String(packageJson.scripts?.['build:desktop']).includes('build-desktop.ps1')) {
-  issues.push('缺少桌面启动器构建命令');
-}
-
-if (!fs.existsSync(executablePath)) issues.push('缺少可双击的关系图编辑器.exe');
-else {
+if (executablePath && !fs.existsSync(executablePath)) issues.push('RELATIONSHIP_GRAPH_LEGACY_EXE 指向的文件不存在');
+else if (executablePath) {
   const executable = fs.readFileSync(executablePath);
   if (executable.length < 400000) issues.push('桌面程序文件异常过小，可能没有包含全部界面资源');
   if (executable[0] !== 0x4d || executable[1] !== 0x5a) issues.push('桌面启动器不是有效的 Windows PE 文件');
   const buildInputs = [
     'desktop/RelationshipGraphLauncher.cs',
-    'desktop/build-desktop.ps1',
     ...embeddedResourceFiles
   ];
   const newestInputTime = Math.max(...buildInputs.map(file => fs.statSync(path.join(projectDirectory, file)).mtimeMs));
   if (fs.statSync(executablePath).mtimeMs < newestInputTime) issues.push('桌面程序早于源码或内嵌资源，需要重新构建');
 }
 
-if (!fs.existsSync(iconPath)) issues.push('缺少 Windows 桌面图标');
+if (!fs.existsSync(iconPath)) issues.push('缺少旧版网页图标');
 else {
-  const icon = fs.readFileSync(iconPath);
-  if (icon.length < 10000 || icon[0] !== 0 || icon[1] !== 0 || icon[2] !== 1 || icon[3] !== 0) {
-    issues.push('Windows 桌面图标无效');
+  const icon = fs.readFileSync(iconPath, 'utf8');
+  if (!icon.includes('<svg') || !icon.includes('</svg>')) {
+    issues.push('旧版网页图标无效');
   }
 }
 
@@ -134,7 +130,7 @@ let serverRuntimeVerified = false;
 let singleFilePortable = false;
 let portableTestDirectory = null;
 try {
-  if (!preexistingServer && fs.existsSync(executablePath)) {
+  if (!preexistingServer && executablePath && fs.existsSync(executablePath)) {
     portableTestDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'relationship-graph-single-exe-'));
     const portableExecutablePath = path.join(portableTestDirectory, '关系图编辑器.exe');
     fs.copyFileSync(executablePath, portableExecutablePath);
@@ -217,7 +213,7 @@ try {
 
 const summary = {
   brandedDesktopUi: !issues.some(issue => issue.includes('品牌') || issue.includes('视觉系统') || issue.includes('产品表面')),
-  nativeLauncher: fs.existsSync(executablePath) && !issues.some(issue => issue.includes('启动器')),
+  nativeLauncher: !issues.some(issue => issue.includes('启动器')),
   singleFilePortable,
   loopbackOnly: launcherSource.includes('IPAddress.Loopback'),
   serverRuntimeVerified,
