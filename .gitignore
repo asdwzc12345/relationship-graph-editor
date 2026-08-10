@@ -12,6 +12,7 @@ obj/
 *.log
 *.tmp
 *.bak
+*.publish-backup
 
 # Operating-system metadata
 .DS_Store

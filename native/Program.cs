@@ -233,6 +233,7 @@ namespace RelationshipGraphNative
                     Require(resizeCanvas.ResizeCursorForTesting("nw") == Cursors.SizeNWSE && resizeCanvas.ResizeCursorForTesting("ne") == Cursors.SizeNESW, "分组四角缩放光标方向错误");
                     int nodeCount = windowGraph.nodes.Count; window.AddNodeAtForTesting(new System.Drawing.PointF(180, 250));
                     Require(windowGraph.nodes.Count == nodeCount + 1 && windowGraph.nodes[windowGraph.nodes.Count - 1].group == windowGraph.groups[0].id, "双击位置创建节点或自动归组失败");
+                    Require(windowGraph.nodes[windowGraph.nodes.Count - 1].type == "节点类型", "新建节点没有使用默认的节点类型文字");
                     SplitContainer splitter = null;
                     foreach (Control control in window.Controls) if (control is SplitContainer) { splitter = (SplitContainer)control; break; }
                     Require(splitter != null && splitter.Panel1MinSize == 600 && splitter.Panel2MinSize == 360, "主窗口分栏未完成宽松布局");

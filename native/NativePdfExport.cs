@@ -109,7 +109,7 @@ namespace RelationshipGraphNative
                     SetFill(content, NodeColor(node.kind)); AppendPath(content, shape); content.Write("f\n");
                     SetStroke(content, "#697785"); content.Write("1.4 w\n"); AppendPath(content, shape); content.Write("S\n");
                 }
-                using (GraphicsPath type = TextPath(node.type ?? "节点", new RectangleF(node.x + 9, node.y + 3, Math.Max(1, node.w - 18), 15), 7.8f, FontStyle.Regular, StringAlignment.Near, StringAlignment.Center))
+                using (GraphicsPath type = TextPath(node.type ?? "节点类型", new RectangleF(node.x + 9, node.y + 3, Math.Max(1, node.w - 18), 15), 7.8f, FontStyle.Regular, StringAlignment.Near, StringAlignment.Center))
                 {
                     SetFill(content, "#425064"); AppendPath(content, type); content.Write("f\n");
                 }

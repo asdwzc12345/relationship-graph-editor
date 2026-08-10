@@ -945,7 +945,7 @@ namespace RelationshipGraphNative
                     GraphNode node;
                     if (_nodes.TryGetValue(entityId, out node))
                     {
-                        if (field == "type") { value = value.Length == 0 ? "节点" : value; if (node.type != value) { beforeJson = GraphSerialization.Serialize(_document, false); node.type = value; changed = true; } }
+                        if (field == "type") { value = value.Length == 0 ? "节点类型" : value; if (node.type != value) { beforeJson = GraphSerialization.Serialize(_document, false); node.type = value; changed = true; } }
                         else { value = value.Length == 0 ? "未命名节点" : value; if (node.label != value) { beforeJson = GraphSerialization.Serialize(_document, false); node.label = value; changed = true; } }
                     }
                 }
@@ -1447,7 +1447,7 @@ namespace RelationshipGraphNative
                         using (Pen pen = new Pen(Color.FromArgb(dim ? 40 : 255, border), (primary ? 4f : sameNameHighlighted ? 3.4f : selected || related ? 3f : 1.4f) * unit)) graphics.DrawPath(pen, shape);
                     }
                     using (Brush small = new SolidBrush(Color.FromArgb(dim ? 45 : 210, _darkTheme ? Color.FromArgb(190, 201, 211) : Color.FromArgb(50, 62, 75))))
-                        graphics.DrawString(node.type ?? "节点", _nodeTypeFont, small, new RectangleF(node.x + 9, node.y + 2, Math.Max(1, node.w - 18), Math.Min(18, Math.Max(1, node.h - 4))), _entityHeaderFormat);
+                        graphics.DrawString(node.type ?? "节点类型", _nodeTypeFont, small, new RectangleF(node.x + 9, node.y + 2, Math.Max(1, node.w - 18), Math.Min(18, Math.Max(1, node.h - 4))), _entityHeaderFormat);
                     using (Brush text = new SolidBrush(Color.FromArgb(dim ? 45 : 245, _darkTheme ? Color.FromArgb(242, 245, 248) : Color.FromArgb(25, 35, 48))))
                         graphics.DrawString(node.label, _nodeLabelFont, text, new RectangleF(node.x + 6, node.y + 17, node.w - 12, node.h - 18), _nodeLabelFormat);
                 }
@@ -2175,7 +2175,7 @@ namespace RelationshipGraphNative
         }
         private static RectangleF NodeTypeEditArea(GraphNode node)
         {
-            float width = Math.Min(node.w - 12, Math.Max(48, (node.type ?? "节点").Length * 13 + 18));
+            float width = Math.Min(node.w - 12, Math.Max(48, (node.type ?? "节点类型").Length * 13 + 18));
             return new RectangleF(node.x + 5, node.y + 2, width, Math.Min(22, node.h));
         }
         private static RectangleF NodeLabelEditArea(GraphNode node) { return new RectangleF(node.x + 5, node.y + 20, node.w - 10, Math.Max(24, node.h - 22)); }

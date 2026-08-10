@@ -430,7 +430,7 @@ namespace RelationshipGraphNative
             if (kind == "content") return "内容信息";
             if (kind == "staff") return "人员岗位";
             if (kind == "commercial") return "商业信息";
-            return "工作步骤";
+            return "节点类型";
         }
 
         private static float Finite(float value, float fallback) { return Single.IsNaN(value) || Single.IsInfinity(value) ? fallback : value; }

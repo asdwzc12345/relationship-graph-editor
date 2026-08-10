@@ -734,7 +734,7 @@ namespace RelationshipGraphNative
             const float width = 150f, height = 55f;
             GraphNode node = new GraphNode
             {
-                id = GraphSerialization.UniqueId("node", ids), label = "新节点", type = "工作步骤", kind = "system",
+                id = GraphSerialization.UniqueId("node", ids), label = "新节点", type = "节点类型", kind = "system",
                 group = group == null ? "" : group.id,
                 x = worldPoint.X - width / 2f,
                 y = worldPoint.Y - height / 2f,
