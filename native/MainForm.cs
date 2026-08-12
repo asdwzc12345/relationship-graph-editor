@@ -15,6 +15,7 @@ namespace RelationshipGraphNative
         private const int InspectorRight = 24;
         private readonly GraphCanvas _canvas = new GraphCanvas();
         private readonly Panel _inspector = new Panel();
+        private readonly Panel _flowchartPalette = new Panel();
         private readonly ToolStripStatusLabel _statusText = new ToolStripStatusLabel();
         private readonly ToolStripStatusLabel _countText = new ToolStripStatusLabel();
         private readonly ToolStripStatusLabel _zoomText = new ToolStripStatusLabel();
@@ -82,8 +83,10 @@ namespace RelationshipGraphNative
             split.FixedPanel = FixedPanel.Panel2;
             split.SplitterWidth = 7;
             split.Panel1.Controls.Add(_canvas);
+            split.Panel1.Controls.Add(_flowchartPalette);
             split.Panel2.Controls.Add(_inspector);
             _canvas.Dock = DockStyle.Fill;
+            _flowchartPalette.Dock = DockStyle.Left; _flowchartPalette.Width = 220; _flowchartPalette.AutoScroll = true; _flowchartPalette.Padding = new Padding(16, 20, 16, 20); _flowchartPalette.Visible = false;
             _inspector.Dock = DockStyle.Fill;
             _inspector.AutoScroll = true;
             _inspector.BackColor = Color.White;
@@ -117,7 +120,10 @@ namespace RelationshipGraphNative
             _canvas.SelectionChanged += delegate { FlushPendingInspectorChange(); RebuildInspector(); UpdateStatus(); };
             _canvas.GraphCommitted += CanvasGraphCommitted;
             _canvas.ViewChanged += delegate { UpdateStatus(); };
-            _canvas.BlankDoubleClicked += delegate(object sender, CanvasPointEventArgs e) { AddNodeAt(e.WorldPoint); };
+            _canvas.BlankDoubleClicked += delegate(object sender, CanvasPointEventArgs e) { if (!IsFlowchart) AddNodeAt(e.WorldPoint); };
+            _canvas.AllowDrop = true;
+            _canvas.DragEnter += delegate(object sender, DragEventArgs e) { if (IsFlowchart && e.Data.GetDataPresent("FlowchartShape")) e.Effect = DragDropEffects.Copy; };
+            _canvas.DragDrop += delegate(object sender, DragEventArgs e) { string shape = e.Data.GetData("FlowchartShape") as string; if (IsFlowchart && !String.IsNullOrEmpty(shape)) AddNodeAt(_canvas.ClientPointToWorld(_canvas.PointToClient(new Point(e.X, e.Y))), "已从组件库添加流程图形", shape); };
             FormClosing += MainFormClosing;
             FormClosed += delegate { _inspectorSaveTimer.Dispose(); };
             KeyDown += MainFormKeyDown;
@@ -143,7 +149,8 @@ namespace RelationshipGraphNative
         {
             MenuStrip menu = new MenuStrip();
             ToolStripMenuItem file = new ToolStripMenuItem("文件(&F)");
-            file.DropDownItems.Add(MenuItem("新建空白图", Keys.Control | Keys.N, delegate { NewBlank(); }));
+            file.DropDownItems.Add(MenuItem("新建关系图", Keys.Control | Keys.N, NewRelationshipGraph));
+            file.DropDownItems.Add(MenuItem("新建流程图", Keys.Control | Keys.Shift | Keys.N, NewFlowchart));
             file.DropDownItems.Add(MenuItem("恢复默认测试用图", Keys.None, RestoreDefault));
             file.DropDownItems.Add(new ToolStripSeparator());
             file.DropDownItems.Add(MenuItem("导入 JSON / 只读可视图…", Keys.Control | Keys.O, OpenGraph));
@@ -202,7 +209,7 @@ namespace RelationshipGraphNative
             _undoButton.Click += delegate { Undo(); }; _redoButton.Click += delegate { Redo(); };
 
             ToolStripButton addGroup = new ToolStripButton("＋分组"); addGroup.Click += delegate { AddGroup(); };
-            ToolStripButton addNode = new ToolStripButton("＋节点"); addNode.Click += delegate { AddNode(); };
+            ToolStripButton addNode = new ToolStripButton("＋节点"); addNode.Click += delegate { if (!IsFlowchart) AddNode(); else _statusText.Text = "请从右侧组件库拖入流程图形"; };
             ToolStripButton fit = new ToolStripButton("适合窗口"); fit.Click += delegate { _canvas.FitToView(); };
             ToolStripButton zoomOut = new ToolStripButton("－"); zoomOut.Click += delegate { _canvas.ZoomBy(.85f); };
             ToolStripButton zoomIn = new ToolStripButton("＋"); zoomIn.Click += delegate { _canvas.ZoomBy(1.18f); };
@@ -299,6 +306,7 @@ namespace RelationshipGraphNative
                 _split.Panel2.BackColor = dark ? NativeTheme.DarkSurface : Color.White;
             }
             _canvas.DarkTheme = dark;
+            if (_flowchartPalette != null) { _flowchartPalette.BackColor = dark ? NativeTheme.DarkSurface : Color.White; NativeTheme.ApplyControlTree(_flowchartPalette, dark); }
             bool previous = _settingUi; _settingUi = true;
             _themeBox.SelectedIndex = ThemeIndex(_themeMode);
             _systemThemeItem.Checked = _themeMode == "system";
@@ -404,7 +412,7 @@ namespace RelationshipGraphNative
         {
             FlushPendingInspectorChange();
             if (clearHistory) { _undo.Clear(); _redo.Clear(); }
-            _canvas.Document = graph; _canvas.EditMode = true; _currentFile = currentFile ?? ""; _isDirty = dirty;
+            _canvas.Document = graph; _canvas.EditMode = true; _currentFile = currentFile ?? ""; _isDirty = dirty; RebuildFlowchartPalette();
             _savedDocumentFingerprint = dirty ? "" : DocumentFingerprint(_canvas.Document);
             bool autosaved = !saveAutosave || (dirty ? SaveAutosave() : ClearAutosaveSafely());
             ApplyTheme(); RebuildInspector(); UpdateStatus(); UpdateTitle();
@@ -470,11 +478,21 @@ namespace RelationshipGraphNative
             }
         }
 
-        private void NewBlank()
+        private void NewRelationshipGraph()
         {
             if (!EnsureCurrentDocumentCanBeReplaced()) return;
-            LoadDocument(GraphSerialization.CreateBlank("未命名关系图"), "已新建空白关系图", true, "", false, true);
+            GraphDocument graph = GraphSerialization.CreateBlank("未命名关系图"); graph.meta.diagramType = "relationship";
+            LoadDocument(graph, "已新建空白关系图", true, "", false, true);
         }
+
+        private void NewFlowchart()
+        {
+            if (!EnsureCurrentDocumentCanBeReplaced()) return;
+            GraphDocument graph = GraphSerialization.CreateBlank("未命名流程图"); graph.meta.diagramType = "flowchart";
+            LoadDocument(graph, "已新建空白流程图", true, "", false, true);
+        }
+
+        private bool IsFlowchart { get { return _canvas.Document != null && _canvas.Document.meta != null && _canvas.Document.meta.diagramType == "flowchart"; } }
 
         private void RestoreDefault()
         {
@@ -714,12 +732,16 @@ namespace RelationshipGraphNative
 
         private void AddNode()
         {
-            AddNodeAt(_canvas.ViewCenterWorld, "节点已在屏幕中心添加");
+            AddNode("process");
         }
+
+        private void AddNode(string shape) { AddNodeAt(_canvas.ViewCenterWorld, "流程图形已在屏幕中心添加", shape); }
 
         private void AddNodeAt(PointF worldPoint) { AddNodeAt(worldPoint, "已在双击位置创建节点"); }
 
-        private void AddNodeAt(PointF worldPoint, string commitMessage)
+        private void AddNodeAt(PointF worldPoint, string commitMessage) { AddNodeAt(worldPoint, commitMessage, "process"); }
+
+        private void AddNodeAt(PointF worldPoint, string commitMessage, string shape)
         {
             FinishPendingCanvasWork();
             if (!_canvas.EditMode) return;
@@ -734,7 +756,7 @@ namespace RelationshipGraphNative
             const float width = 150f, height = 55f;
             GraphNode node = new GraphNode
             {
-                id = GraphSerialization.UniqueId("node", ids), label = "新节点", type = "节点类型", kind = "system",
+                id = GraphSerialization.UniqueId("node", ids), label = shape == "decision" ? "判断条件" : shape == "terminator" ? "开始 / 结束" : shape == "data" ? "输入 / 输出" : shape == "document" ? "文档" : "处理步骤", type = "节点类型", kind = shape == "terminator" ? "output" : shape == "decision" ? "commercial" : shape == "data" ? "resource" : shape == "document" ? "content" : "system", shape = GraphSerialization.NormalizeNodeShape(shape),
                 group = group == null ? "" : group.id,
                 x = worldPoint.X - width / 2f,
                 y = worldPoint.Y - height / 2f,
@@ -911,7 +933,7 @@ namespace RelationshipGraphNative
                     string groupId = "", mappedGroup;
                     if (groupMap.TryGetValue(source.group ?? "", out mappedGroup)) groupId = mappedGroup;
                     else if (_canvas.Document.groups.Any(delegate(GraphGroup group) { return group.id == (source.group ?? ""); })) groupId = source.group ?? "";
-                    GraphNode created = new GraphNode { id = newId, label = source.label, type = source.type, kind = source.kind, group = groupId, x = source.x + dx, y = source.y + dy, w = source.w, h = source.h, note = source.note };
+                    GraphNode created = new GraphNode { id = newId, label = source.label, type = source.type, kind = source.kind, shape = source.shape, group = groupId, x = source.x + dx, y = source.y + dy, w = source.w, h = source.h, note = source.note };
                     _canvas.Document.nodes.Add(created); pastedNodeIds.Add(newId);
                 }
                 foreach (GraphEdge source in sourceEdges)
@@ -1102,6 +1124,42 @@ namespace RelationshipGraphNative
             foreach (Control child in root.Controls) CollectEndpointBoxes(child, result);
         }
 
+        private void RebuildFlowchartPalette()
+        {
+            while (_flowchartPalette.Controls.Count > 0) _flowchartPalette.Controls[0].Dispose();
+            _flowchartPalette.Visible = IsFlowchart; if (!IsFlowchart) return;
+            Label title = new Label { Text = "流程图组件", Font = new Font(Font, FontStyle.Bold), AutoSize = false, TextAlign = ContentAlignment.MiddleLeft };
+            title.SetBounds(16, 16, 188, 32); _flowchartPalette.Controls.Add(title);
+            int y = 58; AddPaletteItem("开始 / 结束", "terminator", ref y); AddPaletteItem("处理步骤", "process", ref y); AddPaletteItem("判断 / 分支", "decision", ref y); AddPaletteItem("输入 / 输出", "data", ref y); AddPaletteItem("文档", "document", ref y);
+            NativeTheme.ApplyControlTree(_flowchartPalette, _darkTheme); _flowchartPalette.BringToFront();
+        }
+
+        private void AddPaletteItem(string text, string shape, ref int y)
+        {
+            Button button = new Button(); button.Text = ""; button.Tag = shape; button.FlatStyle = FlatStyle.Flat; button.FlatAppearance.BorderSize = 0;
+            button.SetBounds(16, y, 188, 52); button.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            button.MouseDown += delegate(object sender, MouseEventArgs e) { if (e.Button == MouseButtons.Left) button.DoDragDrop(new DataObject("FlowchartShape", shape), DragDropEffects.Copy); };
+            button.Paint += delegate(object sender, PaintEventArgs e) { DrawPaletteShape(e.Graphics, button.ClientRectangle, shape, text); };
+            _flowchartPalette.Controls.Add(button); y += 64;
+        }
+
+        private static void DrawPaletteShape(Graphics graphics, Rectangle bounds, string shape, string text)
+        {
+            graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            RectangleF r = new RectangleF(20, 5, Math.Max(40, bounds.Width - 40), Math.Max(30, bounds.Height - 10));
+            Color fill = shape == "terminator" ? Color.FromArgb(207, 241, 216) : shape == "decision" ? Color.FromArgb(255, 226, 190) : shape == "data" ? Color.FromArgb(205, 229, 252) : shape == "document" ? Color.FromArgb(249, 213, 234) : Color.FromArgb(222, 229, 237);
+            using (System.Drawing.Drawing2D.GraphicsPath path = new System.Drawing.Drawing2D.GraphicsPath())
+            {
+                if (shape == "terminator") path.AddEllipse(r);
+                else if (shape == "decision") path.AddPolygon(new[] { new PointF(r.Left + r.Width / 2, r.Top), new PointF(r.Right, r.Top + r.Height / 2), new PointF(r.Left + r.Width / 2, r.Bottom), new PointF(r.Left, r.Top + r.Height / 2) });
+                else if (shape == "data") path.AddPolygon(new[] { new PointF(r.Left + 14, r.Top), new PointF(r.Right, r.Top), new PointF(r.Right - 14, r.Bottom), new PointF(r.Left, r.Bottom) });
+                else if (shape == "document") { path.AddLines(new[] { new PointF(r.Left, r.Top), new PointF(r.Right, r.Top), new PointF(r.Right, r.Bottom - 7), new PointF(r.Right - r.Width / 4, r.Bottom), new PointF(r.Left + r.Width / 4, r.Bottom - 7), new PointF(r.Left, r.Bottom), new PointF(r.Left, r.Top) }); path.CloseFigure(); }
+                else path.AddRectangle(r);
+                using (Brush brush = new SolidBrush(fill)) graphics.FillPath(brush, path); using (Pen pen = new Pen(Color.FromArgb(90, 105, 120), 1.4f)) graphics.DrawPath(pen, path);
+            }
+            TextRenderer.DrawText(graphics, text, SystemFonts.MessageBoxFont, Rectangle.Round(r), Color.FromArgb(30, 40, 52), TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        }
+
         private void BuildProjectInspector(ref int y)
         {
             AddMuted("未选择对象", ref y); AddParagraph("先单击对象进行选择；再次拖动已选择的节点或分组可移动。拖动未选择的节点或分组会创建关系。右键可清除全部选择。", ref y);
@@ -1114,14 +1172,16 @@ namespace RelationshipGraphNative
         {
             GraphNode node = _canvas.Document.nodes.FirstOrDefault(delegate(GraphNode item) { return item.id == _canvas.SelectedId; }); if (node == null) return;
             AddMuted("节点 · " + node.id, ref y);
-            TextBox label = AddTextField("名称", node.label, false, ref y); TextBox type = AddTextField("类型", node.type, false, ref y);
+            TextBox label = AddTextField("名称", node.label, false, ref y); TextBox type = IsFlowchart ? null : AddTextField("类型", node.type, false, ref y);
             ComboBox kind = AddColorCategoryField(node.kind, ref y);
+            ComboBox shape = IsFlowchart ? AddComboField("流程图形", new[] { "处理步骤", "开始 / 结束", "判断 / 分支", "输入 / 输出", "文档" }, ShapeIndex(node.shape), ref y) : null;
             AddMuted("仅影响节点配色，不影响节点类型、关系或功能。", ref y);
             AddLabel("所属分组（自动匹配，只读）", ref y); AddParagraph(AutomaticMembershipText(node.groups), ref y);
             TextBox note = AddTextField("备注", node.note, true, ref y);
             BindAutoText(label, false, delegate(string value) { node.label = value; }, "节点名称已自动保存");
-            BindAutoText(type, false, delegate(string value) { node.type = value; }, "节点类型已自动保存");
+            if (type != null) BindAutoText(type, false, delegate(string value) { node.type = value; }, "节点类型已自动保存");
             BindAutoCombo(kind, delegate { ColorCategoryChoice choice = kind.SelectedItem as ColorCategoryChoice; if (choice != null) node.kind = choice.Kind; }, "节点颜色分类已自动保存");
+            if (shape != null) BindAutoCombo(shape, delegate { node.shape = ShapeAt(shape.SelectedIndex); }, "流程图形已自动保存");
             BindAutoText(note, true, delegate(string value) { node.note = value; }, "节点备注已自动保存");
             AddParagraph(RelationSummary("node", node.id), ref y);
         }
@@ -1351,6 +1411,8 @@ namespace RelationshipGraphNative
         internal bool DirtyForTesting { get { return _isDirty; } }
         internal string AutosavePathForTesting { get { return _autosavePath; } }
         private static string LineTypeAt(int index) { return index == 1 ? "straight" : index == 2 ? "polyline" : "curve"; }
+        private static int ShapeIndex(string shape) { return shape == "terminator" ? 1 : shape == "decision" ? 2 : shape == "data" ? 3 : shape == "document" ? 4 : 0; }
+        private static string ShapeAt(int index) { return index == 1 ? "terminator" : index == 2 ? "decision" : index == 3 ? "data" : index == 4 ? "document" : "process"; }
         private static int LineTypeIndex(string lineType) { return lineType == "straight" ? 1 : lineType == "polyline" ? 2 : 0; }
 
         private void MainFormKeyDown(object sender, KeyEventArgs e)

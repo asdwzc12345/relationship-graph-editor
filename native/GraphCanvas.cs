@@ -171,6 +171,8 @@ namespace RelationshipGraphNative
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.StandardClick | ControlStyles.StandardDoubleClick, true);
         }
 
+        public PointF ClientPointToWorld(Point point) { return ScreenToWorld(point); }
+
         protected override void OnFontChanged(EventArgs e)
         {
             base.OnFontChanged(e);
@@ -1440,16 +1442,17 @@ namespace RelationshipGraphNative
                     bool related = focused && focusEntities.Contains(key) && !primary && !sameNameHighlighted && !inactiveSameNameNode;
                     bool dim = focused && (!focusEntities.Contains(key) || inactiveSameNameNode);
                     Color fillColor = _darkTheme ? DarkNodeColor(node.kind) : NodeColor(node.kind);
-                    using (GraphicsPath shape = RoundRect(nodeRect, 9))
+                    using (GraphicsPath shape = NodeShape(node))
                     {
                         using (Brush fill = new SolidBrush(Color.FromArgb(dim ? 30 : 235, fillColor))) graphics.FillPath(fill, shape);
                         Color border = primary || sameNameHighlighted ? Color.FromArgb(76, 139, 245) : related ? Color.FromArgb(74, 190, 126) : (_darkTheme ? Color.FromArgb(125, 140, 154) : Color.FromArgb(105, 119, 133));
                         using (Pen pen = new Pen(Color.FromArgb(dim ? 40 : 255, border), (primary ? 4f : sameNameHighlighted ? 3.4f : selected || related ? 3f : 1.4f) * unit)) graphics.DrawPath(pen, shape);
                     }
-                    using (Brush small = new SolidBrush(Color.FromArgb(dim ? 45 : 210, _darkTheme ? Color.FromArgb(190, 201, 211) : Color.FromArgb(50, 62, 75))))
+                    bool flowchart = _document.meta != null && _document.meta.diagramType == "flowchart";
+                    if (!flowchart) using (Brush small = new SolidBrush(Color.FromArgb(dim ? 45 : 210, _darkTheme ? Color.FromArgb(190, 201, 211) : Color.FromArgb(50, 62, 75))))
                         graphics.DrawString(node.type ?? "节点类型", _nodeTypeFont, small, new RectangleF(node.x + 9, node.y + 2, Math.Max(1, node.w - 18), Math.Min(18, Math.Max(1, node.h - 4))), _entityHeaderFormat);
                     using (Brush text = new SolidBrush(Color.FromArgb(dim ? 45 : 245, _darkTheme ? Color.FromArgb(242, 245, 248) : Color.FromArgb(25, 35, 48))))
-                        graphics.DrawString(node.label, _nodeLabelFont, text, new RectangleF(node.x + 6, node.y + 17, node.w - 12, node.h - 18), _nodeLabelFormat);
+                        graphics.DrawString(node.label, _nodeLabelFont, text, flowchart ? new RectangleF(node.x + 10, node.y + 6, node.w - 20, node.h - 12) : new RectangleF(node.x + 6, node.y + 17, node.w - 12, node.h - 18), _nodeLabelFormat);
                 }
 
                 if (interactive && EditMode)
@@ -2236,6 +2239,19 @@ namespace RelationshipGraphNative
             points["nw"] = new PointF(rect.Left, rect.Top); points["ne"] = new PointF(rect.Right, rect.Top);
             points["se"] = new PointF(rect.Right, rect.Bottom); points["sw"] = new PointF(rect.Left, rect.Bottom); return points;
         }
+        private static GraphicsPath NodeShape(GraphNode node)
+        {
+            RectangleF r = RectOf(node); GraphicsPath path = new GraphicsPath();
+            switch (GraphSerialization.NormalizeNodeShape(node.shape))
+            {
+                case "terminator": return RoundRect(r, r.Height / 2f);
+                case "decision": path.AddPolygon(new[] { new PointF(r.Left + r.Width / 2f, r.Top), new PointF(r.Right, r.Top + r.Height / 2f), new PointF(r.Left + r.Width / 2f, r.Bottom), new PointF(r.Left, r.Top + r.Height / 2f) }); return path;
+                case "data": float inset = Math.Min(18f, r.Width / 6f); path.AddPolygon(new[] { new PointF(r.Left + inset, r.Top), new PointF(r.Right, r.Top), new PointF(r.Right - inset, r.Bottom), new PointF(r.Left, r.Bottom) }); return path;
+                case "document": path.AddLines(new[] { new PointF(r.Left, r.Top), new PointF(r.Right, r.Top), new PointF(r.Right, r.Bottom - 8), new PointF(r.Right - r.Width * .25f, r.Bottom), new PointF(r.Left + r.Width * .25f, r.Bottom - 8), new PointF(r.Left, r.Bottom), new PointF(r.Left, r.Top) }); path.CloseFigure(); return path;
+                default: path.Dispose(); return RoundRect(r, 4);
+            }
+        }
+
         private static GraphicsPath RoundRect(RectangleF rect, float radius)
         {
             GraphicsPath path = new GraphicsPath(); float diameter = radius * 2;

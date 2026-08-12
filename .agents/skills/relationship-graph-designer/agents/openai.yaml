@@ -1,0 +1,7 @@
+interface:
+  display_name: "关系图设计与绘制"
+  short_description: "将自然语言需求拆解为结构清晰、关系准确且可继续编辑的关系图"
+  default_prompt: "Use $relationship-graph-designer to design or revise a relationship graph from my request."
+
+policy:
+  allow_implicit_invocation: true

@@ -24,6 +24,7 @@ namespace RelationshipGraphNative
     public sealed class GraphMeta
     {
         public string title { get; set; }
+        public string diagramType { get; set; }
         public float canvasWidth { get; set; }
         public float canvasHeight { get; set; }
         public string updatedAt { get; set; }
@@ -60,6 +61,7 @@ namespace RelationshipGraphNative
         public string label { get; set; }
         public string type { get; set; }
         public string kind { get; set; }
+        public string shape { get; set; }
         public string group { get; set; }
         public List<string> groups { get; set; }
         public float x { get; set; }
@@ -212,7 +214,7 @@ namespace RelationshipGraphNative
         {
             GraphDocument graph = new GraphDocument();
             graph.version = SchemaVersion;
-            graph.meta = new GraphMeta { title = Clean(title, "未命名关系图", 80), canvasWidth = 1380, canvasHeight = 760, updatedAt = DateTime.UtcNow.ToString("o") };
+            graph.meta = new GraphMeta { title = Clean(title, "未命名关系图", 80), diagramType = "relationship", canvasWidth = 1380, canvasHeight = 760, updatedAt = DateTime.UtcNow.ToString("o") };
             graph.settings = DefaultSettings();
             graph.groups = new List<GraphGroup>();
             graph.nodes = new List<GraphNode>();
@@ -246,6 +248,7 @@ namespace RelationshipGraphNative
             graph.version = SchemaVersion;
             if (graph.meta == null) graph.meta = new GraphMeta();
             graph.meta.title = Clean(graph.meta.title, "未命名关系图", 80);
+            graph.meta.diagramType = graph.meta.diagramType == "flowchart" ? "flowchart" : "relationship";
             graph.meta.canvasWidth = Clamp(Finite(graph.meta.canvasWidth, 1380), 600, 20000);
             graph.meta.canvasHeight = Clamp(Finite(graph.meta.canvasHeight, 760), 400, 20000);
             graph.meta.updatedAt = String.IsNullOrWhiteSpace(graph.meta.updatedAt) ? DateTime.UtcNow.ToString("o") : graph.meta.updatedAt;
@@ -290,6 +293,7 @@ namespace RelationshipGraphNative
                 node.label = Clean(node.label, "节点 " + (i + 1), 40);
                 node.type = Clean(node.type, KindLabel(node.kind), 30);
                 node.kind = NormalizeKind(node.kind, node.type);
+                node.shape = NormalizeNodeShape(node.shape);
                 string mappedGroup;
                 node.group = groupIdMap.TryGetValue(originalGroup, out mappedGroup) ? mappedGroup : (groupIds.Contains(originalGroup) ? originalGroup : "");
                 node.groups = new List<string>();
@@ -331,6 +335,15 @@ namespace RelationshipGraphNative
             }
             graph.edges = normalizedEdges;
             return graph;
+        }
+
+        public static string NormalizeNodeShape(string shape)
+        {
+            switch ((shape ?? "").Trim().ToLowerInvariant())
+            {
+                case "terminator": case "process": case "decision": case "data": case "document": return shape.Trim().ToLowerInvariant();
+                default: return "process";
+            }
         }
 
         public static void UpdateAutomaticMemberships(GraphDocument graph)
