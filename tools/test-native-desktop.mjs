@@ -63,6 +63,18 @@ assert.match(sourceText, new RegExp(`AssemblyFileVersion\\("${versionPattern}\\.
 assert.match(sourceText, /Application\.Run\(new MainForm\(\)\)/);
 assert.match(sourceText, /class GraphCanvas : Control/);
 assert.match(sourceText, /class GraphHistory/);
+assert.match(sourceText, /class GraphTextReplacement/);
+assert.match(sourceText, /class ReplaceDialog/);
+assert.match(mainFormText, /Keys\.Control \| Keys\.H/);
+assert.match(mainFormText, /ReplaceSelectedText/);
+assert.match(mainFormText, /ReplaceAllText/);
+assert.match(mainFormText, /ReplacementInitialQuery/);
+assert.match(graphCanvasText, /ReplaceModeActive/);
+assert.match(graphCanvasText, /DrawReplaceModeHighlight/);
+assert.match(graphCanvasText, /_replaceModeTimer\.Interval = 420/);
+assert.match(sourceText, /替换当前所选/);
+assert.match(sourceText, /全部替换/);
+assert.match(sourceText, /SkippedOccurrences/);
 assert.match(sourceText, /MaximumCharacters = 16 \* 1024 \* 1024/);
 assert.match(sourceText, /WriteStreamAtomic/);
 assert.match(sourceText, /File\.Replace\(temporaryPath, targetPath/);

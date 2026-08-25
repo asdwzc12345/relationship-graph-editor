@@ -11,8 +11,8 @@ using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyCompany("Relationship Studio")]
 [assembly: System.Reflection.AssemblyProduct("关系图编辑器")]
 [assembly: System.Reflection.AssemblyCopyright("Copyright © 2026")]
-[assembly: System.Reflection.AssemblyVersion("4.4.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("4.4.0.0")]
+[assembly: System.Reflection.AssemblyVersion("4.5.1.0")]
+[assembly: System.Reflection.AssemblyFileVersion("4.5.1.0")]
 
 namespace RelationshipGraphNative
 {
@@ -67,6 +67,22 @@ namespace RelationshipGraphNative
                 Require(history.Pop().meta.title == "历史 69", "撤销历史顺序错误");
                 GraphDocument blank = GraphSerialization.CreateBlank("空白图");
                 Require(blank.groups.Count == 0 && blank.nodes.Count == 0, "无分组空白图失败");
+
+                GraphDocument replacementGraph = GraphSerialization.CreateBlank("替换测试");
+                replacementGraph.nodes.Add(new GraphNode { id = "replace_1", label = "Alpha Alpha", type = "alpha 类型", kind = "system", group = "", x = 20, y = 20, w = 150, h = 54, note = "备注 ALPHA" });
+                replacementGraph.nodes.Add(new GraphNode { id = "replace_2", label = "Alpha", type = "步骤", kind = "system", group = "", x = 220, y = 20, w = 150, h = 54, note = "" });
+                replacementGraph.groups.Add(new GraphGroup { id = "replace_group", label = "Alpha 分组", x = 0, y = 0, w = 420, h = 160 });
+                replacementGraph.edges.Add(new GraphEdge { id = "replace_edge", source = "replace_1", target = "replace_2", sourceType = "node", targetType = "node", label = "alpha 关系", category = "core", lineType = "curve" });
+                replacementGraph = GraphSerialization.Normalize(replacementGraph);
+                GraphTextReplacementResult selectedReplacement = GraphTextReplacement.ReplaceSelection(replacementGraph, "alpha", "Beta", new string[] { "replace_1" }, new string[0], "");
+                Require(selectedReplacement.AppliedOccurrences == 4 && selectedReplacement.ChangedFields == 3, "替换当前所选没有覆盖名称、类型和备注中的全部匹配");
+                Require(replacementGraph.nodes[0].label == "Beta Beta" && replacementGraph.nodes[1].label == "Alpha" && replacementGraph.groups[0].label == "Alpha 分组", "替换当前所选误改了未选对象");
+                GraphTextReplacementResult emptyNameReplacement = GraphTextReplacement.ReplaceSelection(replacementGraph, "Alpha", "", new string[] { "replace_2" }, new string[0], "");
+                Require(emptyNameReplacement.AppliedOccurrences == 0 && emptyNameReplacement.SkippedOccurrences == 1 && replacementGraph.nodes[1].label == "Alpha", "替换导致空名称时没有安全跳过");
+                GraphTextReplacementResult allReplacement = GraphTextReplacement.ReplaceAll(replacementGraph, "alpha", "Gamma");
+                Require(allReplacement.AppliedOccurrences == 3 && replacementGraph.nodes[1].label == "Gamma" && replacementGraph.groups[0].label == "Gamma 分组" && replacementGraph.edges[0].label == "Gamma 关系", "全部替换没有覆盖整张图的可编辑文字");
+                int literalOccurrences;
+                Require(GraphTextReplacement.ReplaceText("a.a.A", "a.", "$1", out literalOccurrences) == "$1$1A" && literalOccurrences == 2, "替换内容被错误当作正则表达式处理");
 
                 GraphDocument repaired = GraphSerialization.CreateBlank("兼容测试");
                 repaired.groups.Add(new GraphGroup { id = "分组 一", label = "分组", x = 10, y = 10, w = 220, h = 180 });
@@ -207,6 +223,11 @@ namespace RelationshipGraphNative
                     window.SetThemeForTesting("dark"); Require(window.DarkThemeForTesting, "深色界面主题未生效");
                     window.SetThemeForTesting("light"); Require(!window.DarkThemeForTesting, "浅色界面主题未生效");
                     window.CanvasForTesting.SelectEntity("node", windowGraph.nodes[0].id);
+                    Require(window.ReplacementInitialQueryForTesting() == windowGraph.nodes[0].label, "打开替换窗口时没有优先带入当前单选节点名称");
+                    window.CanvasForTesting.ReplaceModeActive = true;
+                    Require(window.CanvasForTesting.ReplaceModeHighlightActiveForTesting, "替换模式没有为当前所选对象启用特殊高亮");
+                    window.CanvasForTesting.ReplaceModeActive = false;
+                    Require(!window.CanvasForTesting.ReplaceModeHighlightActiveForTesting, "退出替换模式后特殊高亮没有停止");
                     Require(window.EditModeForTesting, "主程序启动后未默认进入编辑状态");
                     Require(window.InspectorEditableForTesting, "主程序右侧属性未直接开放编辑");
                     Require(window.InspectorTextVisibleForTesting, "高 DPI 下右侧属性文字仍有遮挡");
@@ -219,6 +240,11 @@ namespace RelationshipGraphNative
                     Require(!window.DirtyForTesting && window.CanvasForTesting.Document.nodes[0].label == savedNodeName, "撤销回保存点后未清除未保存状态");
                     window.RedoForTesting();
                     Require(window.DirtyForTesting && window.CanvasForTesting.Document.nodes[0].label == "自动应用名称", "重做后未恢复未保存状态");
+                    window.CanvasForTesting.SelectEntity("node", window.CanvasForTesting.Document.nodes[0].id);
+                    GraphTextReplacementResult windowReplacement = window.ReplaceSelectedTextForTesting("自动", "批量");
+                    Require(windowReplacement.AppliedOccurrences == 1 && window.CanvasForTesting.Document.nodes[0].label == "批量应用名称", "主窗口替换当前所选未提交");
+                    window.UndoForTesting();
+                    Require(window.CanvasForTesting.Document.nodes[0].label == "自动应用名称", "替换当前所选不能通过一次撤销完整恢复");
                     windowGraph = window.CanvasForTesting.Document;
                     Require(!window.CanvasForTesting.LinkHandlesVisibleForSelectionForTesting, "选中节点后仍显示四个连线圆圈");
                     window.CanvasForTesting.SelectEntity("group", windowGraph.groups[0].id);
@@ -665,7 +691,7 @@ namespace RelationshipGraphNative
                 Require(!MainForm.ShouldDeleteSelectionForTesting(Keys.Back, false), "Backspace 仍会删除节点");
                 Require(!MainForm.ShouldDeleteSelectionForTesting(Keys.Delete, true), "文字输入时 Delete 仍会删除节点");
                 Require(MainForm.ShouldDeleteSelectionForTesting(Keys.Delete, false), "画布 Delete 删除功能失效");
-                File.WriteAllText(reportPath, "{\"ok\":true,\"version\":\"4.4.0\",\"groups\":4,\"nodes\":12,\"edges\":12,\"runtime\":\"native-winforms\"}", new UTF8Encoding(false));
+                File.WriteAllText(reportPath, "{\"ok\":true,\"version\":\"4.5.1\",\"groups\":4,\"nodes\":12,\"edges\":12,\"runtime\":\"native-winforms\"}", new UTF8Encoding(false));
                 return 0;
             }
             catch (Exception error)

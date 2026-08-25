@@ -152,6 +152,9 @@ namespace RelationshipGraphNative
         private StringFormat _nodeLabelFormat;
         private StringFormat _entityHeaderFormat;
         private bool _disposingResources;
+        private readonly Timer _replaceModeTimer = new Timer();
+        private bool _replaceModeActive;
+        private bool _replacePulse;
 
         public event EventHandler SelectionChanged;
         public event EventHandler<GraphCommitEventArgs> GraphCommitted;
@@ -168,6 +171,8 @@ namespace RelationshipGraphNative
             // node proportions stable when Windows changes the monitor DPI.
             _ownedCanvasFont = new Font("Microsoft YaHei UI", 12f, FontStyle.Regular, GraphicsUnit.Pixel);
             Font = _ownedCanvasFont;
+            _replaceModeTimer.Interval = 420;
+            _replaceModeTimer.Tick += delegate { _replacePulse = !_replacePulse; Invalidate(); };
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.StandardClick | ControlStyles.StandardDoubleClick, true);
         }
 
@@ -194,6 +199,7 @@ namespace RelationshipGraphNative
                 DisposeInlineEditorFont();
                 DisposeDrawingResources();
                 ClearEdgeGeometryCache();
+                _replaceModeTimer.Stop(); _replaceModeTimer.Dispose();
                 if (_ownedCanvasFont != null) { _ownedCanvasFont.Dispose(); _ownedCanvasFont = null; }
             }
             base.Dispose(disposing);
@@ -259,6 +265,17 @@ namespace RelationshipGraphNative
         public ICollection<string> SelectedNodeIds { get { return _selectedNodes; } }
         public ICollection<string> SelectedGroupIds { get { return _selectedGroups; } }
         public int SelectionCount { get { return _selectedNodes.Count + _selectedGroups.Count + (_selectedType == "edge" ? 1 : 0); } }
+        public bool ReplaceModeActive
+        {
+            get { return _replaceModeActive; }
+            set
+            {
+                if (_replaceModeActive == value) return;
+                _replaceModeActive = value; _replacePulse = value;
+                if (value) _replaceModeTimer.Start(); else _replaceModeTimer.Stop();
+                Invalidate();
+            }
+        }
         public float Zoom { get { return _zoom; } }
         public PointF ViewOffset { get { return new PointF(_offsetX, _offsetY); } }
         public PointF ViewCenterWorld
@@ -1455,6 +1472,8 @@ namespace RelationshipGraphNative
                         graphics.DrawString(node.label, _nodeLabelFont, text, flowchart ? new RectangleF(node.x + 10, node.y + 6, node.w - 20, node.h - 12) : new RectangleF(node.x + 6, node.y + 17, node.w - 12, node.h - 18), _nodeLabelFormat);
                 }
 
+                if (interactive && _replaceModeActive && SelectionCount > 0) DrawReplaceModeHighlight(graphics, unit);
+
                 if (interactive && EditMode)
                 {
                     if ((_gesture == CanvasGesture.MoveNodes || _gesture == CanvasGesture.MoveGroup || _gesture == CanvasGesture.MoveSelection) && _gestureMoved) { DrawAlignmentGuides(graphics, unit); DrawEqualSpacingHints(graphics, unit); }
@@ -1464,6 +1483,43 @@ namespace RelationshipGraphNative
             }
             finally { graphics.Restore(state); }
         }
+
+        private void DrawReplaceModeHighlight(Graphics graphics, float unit)
+        {
+            Color accent = _darkTheme ? Color.FromArgb(255, 183, 77) : Color.FromArgb(238, 126, 34);
+            int outerAlpha = _replacePulse ? 180 : 75;
+            float outerWidth = (_replacePulse ? 9f : 6f) * unit;
+            using (Pen outer = new Pen(Color.FromArgb(outerAlpha, accent), outerWidth))
+            using (Pen inner = new Pen(Color.FromArgb(245, accent), 2.4f * unit))
+            {
+                outer.LineJoin = LineJoin.Round; outer.StartCap = LineCap.Round; outer.EndCap = LineCap.Round;
+                inner.LineJoin = LineJoin.Round; inner.StartCap = LineCap.Round; inner.EndCap = LineCap.Round;
+                inner.DashStyle = DashStyle.Dash; inner.DashOffset = _replacePulse ? 0f : 4f;
+                foreach (string groupId in _selectedGroups)
+                {
+                    GraphGroup group;
+                    if (!_groups.TryGetValue(groupId, out group)) continue;
+                    using (GraphicsPath shape = RoundRect(RectOf(group), 12)) { graphics.DrawPath(outer, shape); graphics.DrawPath(inner, shape); }
+                }
+                foreach (string nodeId in _selectedNodes)
+                {
+                    GraphNode node;
+                    if (!_nodes.TryGetValue(nodeId, out node)) continue;
+                    using (GraphicsPath shape = NodeShape(node)) { graphics.DrawPath(outer, shape); graphics.DrawPath(inner, shape); }
+                }
+                if (_selectedType == "edge" && !String.IsNullOrEmpty(_selectedId))
+                {
+                    GraphEdge edge = _document.edges.FirstOrDefault(delegate(GraphEdge item) { return item.id == _selectedId; });
+                    if (edge != null)
+                    {
+                        CachedEdgeGeometry geometry = GetEdgeGeometry(edge);
+                        graphics.DrawPath(outer, geometry.Path); graphics.DrawPath(inner, geometry.Path);
+                    }
+                }
+            }
+        }
+
+        internal bool ReplaceModeHighlightActiveForTesting { get { return _replaceModeActive && SelectionCount > 0; } }
 
         private bool EdgeEnvelopeIntersectsVisible(GraphEdge edge, RectangleF visible)
         {

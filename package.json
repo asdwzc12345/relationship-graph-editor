@@ -1,6 +1,6 @@
 {
   "name": "relationship-graph-editor",
-  "version": "4.4.0",
+  "version": "4.5.1",
   "private": true,
   "description": "纯原生 Windows 桌面关系图编辑器",
   "scripts": {

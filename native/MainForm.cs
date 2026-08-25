@@ -50,6 +50,14 @@ namespace RelationshipGraphNative
         private ToolStripMenuItem _systemThemeItem;
         private ToolStripMenuItem _lightThemeItem;
         private ToolStripMenuItem _darkThemeItem;
+        private ReplaceDialog _replaceDialog;
+
+        private sealed class GraphSearchTarget
+        {
+            public string Type;
+            public string Id;
+            public string Label;
+        }
 
         public MainForm() : this(null, true) { }
 
@@ -171,6 +179,9 @@ namespace RelationshipGraphNative
             edit.DropDownItems.Add(MenuItem("撤销", Keys.Control | Keys.Z, Undo));
             edit.DropDownItems.Add(MenuItem("重做", Keys.Control | Keys.Y, Redo));
             edit.DropDownItems.Add(new ToolStripSeparator());
+            edit.DropDownItems.Add(MenuItem("查找", Keys.Control | Keys.F, delegate { FocusSearch(); }));
+            edit.DropDownItems.Add(MenuItem("替换…", Keys.Control | Keys.H, ShowReplaceDialog));
+            edit.DropDownItems.Add(new ToolStripSeparator());
             ToolStripMenuItem copy = MenuItem("复制选中内容", Keys.None, delegate { CopySelected(true); }); copy.ShortcutKeyDisplayString = "Ctrl+C";
             ToolStripMenuItem paste = MenuItem("粘贴", Keys.None, delegate { PasteSelected(true); }); paste.ShortcutKeyDisplayString = "Ctrl+V";
             edit.DropDownItems.Add(copy); edit.DropDownItems.Add(paste);
@@ -226,7 +237,7 @@ namespace RelationshipGraphNative
             _themeBox.AutoSize = false; _themeBox.DropDownStyle = ComboBoxStyle.DropDownList; _themeBox.Width = 128; _themeBox.DropDownWidth = 148;
             _themeBox.Items.AddRange(new object[] { "跟随系统", "浅色", "深色" }); _themeBox.SelectedIndex = ThemeIndex(_themeMode);
             _themeBox.SelectedIndexChanged += delegate { if (!_settingUi) ChangeTheme(ThemeAt(_themeBox.SelectedIndex)); };
-            _searchBox.AutoSize = false; _searchBox.Width = 220; _searchBox.ToolTipText = "输入节点或分组名称，按回车定位";
+            _searchBox.AutoSize = false; _searchBox.Width = 220; _searchBox.ToolTipText = "输入节点、分组或关系文字，按回车查找下一个";
             _searchBox.KeyDown += delegate(object sender, KeyEventArgs e) { if (e.KeyCode == Keys.Enter) { FindEntity(); e.SuppressKeyPress = true; } };
 
             tools.Items.Add(_undoButton); tools.Items.Add(_redoButton); tools.Items.Add(new ToolStripSeparator());
@@ -307,6 +318,11 @@ namespace RelationshipGraphNative
             }
             _canvas.DarkTheme = dark;
             if (_flowchartPalette != null) { _flowchartPalette.BackColor = dark ? NativeTheme.DarkSurface : Color.White; NativeTheme.ApplyControlTree(_flowchartPalette, dark); }
+            if (_replaceDialog != null && !_replaceDialog.IsDisposed)
+            {
+                NativeTheme.ApplyControlTree(_replaceDialog, dark);
+                NativeTheme.ApplyWindowDarkMode(_replaceDialog, dark);
+            }
             bool previous = _settingUi; _settingUi = true;
             _themeBox.SelectedIndex = ThemeIndex(_themeMode);
             _systemThemeItem.Checked = _themeMode == "system";
@@ -1005,15 +1021,171 @@ namespace RelationshipGraphNative
         internal void UndoForTesting() { Undo(); }
         internal void RedoForTesting() { Redo(); }
 
+        private void FocusSearch()
+        {
+            _searchBox.Focus(); _searchBox.SelectAll();
+        }
+
+        private List<GraphSearchTarget> SearchTargets(string query)
+        {
+            List<GraphSearchTarget> results = new List<GraphSearchTarget>();
+            if (_canvas.Document == null || String.IsNullOrWhiteSpace(query)) return results;
+            foreach (GraphNode node in _canvas.Document.nodes)
+                if (GraphTextReplacement.Contains(node.label, query) || GraphTextReplacement.Contains(node.type, query) || GraphTextReplacement.Contains(node.note, query))
+                    results.Add(new GraphSearchTarget { Type = "node", Id = node.id, Label = node.label });
+            foreach (GraphGroup group in _canvas.Document.groups)
+                if (GraphTextReplacement.Contains(group.label, query))
+                    results.Add(new GraphSearchTarget { Type = "group", Id = group.id, Label = group.label });
+            foreach (GraphEdge edge in _canvas.Document.edges)
+                if (GraphTextReplacement.Contains(edge.label, query))
+                    results.Add(new GraphSearchTarget { Type = "edge", Id = edge.id, Label = String.IsNullOrWhiteSpace(edge.label) ? "未命名关系" : edge.label });
+            return results;
+        }
+
         private void FindEntity()
         {
-            string query = (_searchBox.Text ?? "").Trim(); if (query.Length == 0) return;
-            GraphNode node = _canvas.Document.nodes.FirstOrDefault(delegate(GraphNode item) { return item.label.IndexOf(query, StringComparison.CurrentCultureIgnoreCase) >= 0 || item.type.IndexOf(query, StringComparison.CurrentCultureIgnoreCase) >= 0; });
-            if (node != null) { _canvas.SelectEntity("node", node.id); _statusText.Text = "已定位节点：" + node.label; return; }
-            GraphGroup group = _canvas.Document.groups.FirstOrDefault(delegate(GraphGroup item) { return item.label.IndexOf(query, StringComparison.CurrentCultureIgnoreCase) >= 0; });
-            if (group != null) { _canvas.SelectEntity("group", group.id); _statusText.Text = "已定位分组：" + group.label; return; }
-            _statusText.Text = "没有找到“" + query + "”";
+            FindEntity(_searchBox.Text ?? "");
         }
+
+        private void FindEntity(string query)
+        {
+            if (String.IsNullOrWhiteSpace(query))
+            {
+                _statusText.Text = "请输入要查找的内容";
+                SetReplaceDialogStatus("请输入要查找的内容。", true);
+                return;
+            }
+            _searchBox.Text = query;
+            List<GraphSearchTarget> results = SearchTargets(query);
+            if (results.Count == 0)
+            {
+                _statusText.Text = "没有找到“" + query + "”";
+                SetReplaceDialogStatus("没有找到“" + query + "”。", true);
+                return;
+            }
+            int current = results.FindIndex(delegate(GraphSearchTarget item)
+            {
+                return item.Type == _canvas.SelectedType && item.Id == _canvas.SelectedId;
+            });
+            int next = current < 0 ? 0 : (current + 1) % results.Count;
+            GraphSearchTarget target = results[next];
+            _canvas.SelectEntity(target.Type, target.Id);
+            _statusText.Text = "已定位" + EntityTypeName(target.Type) + "：" + target.Label + "（" + (next + 1) + "/" + results.Count + "）";
+            SetReplaceDialogStatus("已找到第 " + (next + 1) + " 个，共 " + results.Count + " 个对象。", false);
+        }
+
+        private static string EntityTypeName(string type)
+        {
+            return type == "node" ? "节点" : type == "group" ? "分组" : "关系";
+        }
+
+        private void ShowReplaceDialog()
+        {
+            FinishPendingCanvasWork();
+            string initialQuery = ReplacementInitialQuery();
+            if (_replaceDialog != null && !_replaceDialog.IsDisposed)
+            {
+                _canvas.ReplaceModeActive = true;
+                _replaceDialog.Prepare(initialQuery);
+                return;
+            }
+            _canvas.ReplaceModeActive = true;
+            _replaceDialog = new ReplaceDialog(initialQuery);
+            _replaceDialog.FindNextRequested += FindEntity;
+            _replaceDialog.ReplaceSelectionRequested += delegate(string query, string replacement) { ReplaceSelectedText(query, replacement); };
+            _replaceDialog.ReplaceAllRequested += delegate(string query, string replacement) { ReplaceAllText(query, replacement); };
+            _replaceDialog.FormClosed += delegate { _canvas.ReplaceModeActive = false; _replaceDialog = null; };
+            _replaceDialog.Show(this);
+            NativeTheme.ApplyControlTree(_replaceDialog, _darkTheme);
+            NativeTheme.ApplyWindowDarkMode(_replaceDialog, _darkTheme);
+        }
+
+        private string ReplacementInitialQuery()
+        {
+            if (_canvas.SelectionCount == 1)
+            {
+                if (_canvas.SelectedType == "node")
+                {
+                    GraphNode node = _canvas.Document.nodes.FirstOrDefault(delegate(GraphNode item) { return item.id == _canvas.SelectedId; });
+                    if (node != null && !String.IsNullOrWhiteSpace(node.label)) return node.label;
+                }
+                else if (_canvas.SelectedType == "group")
+                {
+                    GraphGroup group = _canvas.Document.groups.FirstOrDefault(delegate(GraphGroup item) { return item.id == _canvas.SelectedId; });
+                    if (group != null && !String.IsNullOrWhiteSpace(group.label)) return group.label;
+                }
+                else if (_canvas.SelectedType == "edge")
+                {
+                    GraphEdge edge = _canvas.Document.edges.FirstOrDefault(delegate(GraphEdge item) { return item.id == _canvas.SelectedId; });
+                    if (edge != null && !String.IsNullOrWhiteSpace(edge.label)) return edge.label;
+                }
+            }
+            return _searchBox.Text ?? "";
+        }
+
+        internal string ReplacementInitialQueryForTesting() { return ReplacementInitialQuery(); }
+
+        private GraphTextReplacementResult ReplaceSelectedText(string query, string replacement)
+        {
+            GraphTextReplacementResult empty = new GraphTextReplacementResult();
+            if (!ValidateReplacementRequest(query)) return empty;
+            FinishPendingCanvasWork();
+            if (_canvas.SelectionCount == 0)
+            {
+                _statusText.Text = "请先在画布中选择要替换的对象";
+                SetReplaceDialogStatus("当前没有选中对象；请先单选、框选或多选。", true);
+                return empty;
+            }
+            string beforeJson = GraphSerialization.Serialize(_canvas.Document, false);
+            string edgeId = _canvas.SelectedType == "edge" ? _canvas.SelectedId : "";
+            GraphTextReplacementResult result = GraphTextReplacement.ReplaceSelection(_canvas.Document, query, replacement,
+                _canvas.SelectedNodeIds, _canvas.SelectedGroupIds, edgeId);
+            FinishReplacement(result, beforeJson, "当前所选");
+            return result;
+        }
+
+        private GraphTextReplacementResult ReplaceAllText(string query, string replacement)
+        {
+            GraphTextReplacementResult empty = new GraphTextReplacementResult();
+            if (!ValidateReplacementRequest(query)) return empty;
+            FinishPendingCanvasWork();
+            string beforeJson = GraphSerialization.Serialize(_canvas.Document, false);
+            GraphTextReplacementResult result = GraphTextReplacement.ReplaceAll(_canvas.Document, query, replacement);
+            FinishReplacement(result, beforeJson, "整张图");
+            return result;
+        }
+
+        private bool ValidateReplacementRequest(string query)
+        {
+            if (!String.IsNullOrWhiteSpace(query)) { _searchBox.Text = query; return true; }
+            _statusText.Text = "请输入要查找的内容";
+            SetReplaceDialogStatus("查找内容不能为空。", true);
+            return false;
+        }
+
+        private void FinishReplacement(GraphTextReplacementResult result, string beforeJson, string scope)
+        {
+            if (result.AppliedOccurrences > 0)
+            {
+                string message = scope + "已替换 " + result.AppliedOccurrences + " 处（" + result.ChangedFields + " 个文本字段）";
+                if (result.SkippedOccurrences > 0) message += "，另有 " + result.SkippedOccurrences + " 处因名称不能为空而跳过";
+                CommitChange(beforeJson, message);
+                SetReplaceDialogStatus(message + "。可按 Ctrl+Z 撤销。", false);
+                return;
+            }
+            string noChange = result.SkippedOccurrences > 0
+                ? "匹配内容会使名称变为空，已跳过 " + result.SkippedOccurrences + " 处。"
+                : scope + "没有可替换的匹配内容。";
+            _statusText.Text = noChange; SetReplaceDialogStatus(noChange, true);
+        }
+
+        private void SetReplaceDialogStatus(string message, bool error)
+        {
+            if (_replaceDialog != null && !_replaceDialog.IsDisposed) _replaceDialog.SetStatus(message, error);
+        }
+
+        internal GraphTextReplacementResult ReplaceSelectedTextForTesting(string query, string replacement) { return ReplaceSelectedText(query, replacement); }
+        internal GraphTextReplacementResult ReplaceAllTextForTesting(string query, string replacement) { return ReplaceAllText(query, replacement); }
 
         private void RebuildInspector()
         {
@@ -1423,7 +1595,8 @@ namespace RelationshipGraphNative
             else if (ShouldDeleteSelection(e.KeyCode, textInputFocused)) { DeleteSelected(); e.Handled = true; e.SuppressKeyPress = true; }
             else if (e.KeyCode == Keys.F2) { _inspector.Focus(); e.Handled = true; }
             else if (e.KeyCode == Keys.Escape) { _canvas.CancelActiveGesture(); _canvas.ClearSelection(); }
-            else if (e.Control && e.KeyCode == Keys.F) { _searchBox.Focus(); e.Handled = true; }
+            else if (e.Control && e.KeyCode == Keys.F) { FocusSearch(); e.Handled = true; e.SuppressKeyPress = true; }
+            else if (e.Control && e.KeyCode == Keys.H) { ShowReplaceDialog(); e.Handled = true; e.SuppressKeyPress = true; }
         }
 
         private bool TextInputHasFocus()
@@ -1450,10 +1623,10 @@ namespace RelationshipGraphNative
 
         private void ShowHelp()
         {
-            MessageBox.Show(this, "关系图打开后始终可以直接编辑。\n\n操作方法：\n· 画布不受默认尺寸边界限制，可向任意方向平移和摆放内容\n· 适合窗口会自动显示当前全部内容\n· 有选中节点或分组时点击＋分组：自动创建包住选中内容的外层分组\n· 没有选中节点或分组时点击＋节点或＋分组：在当前屏幕中心创建\n· 单击对象：选择并显示上下游关系\n· 节点可同时属于多个分组，分组也可位于其他分组内形成多层结构\n· 节点和分组的所属关系按当前位置自动匹配，右侧只读显示层级路径\n· 移动外层分组时，内部子分组和节点会一起移动\n· 空白处按住左键拖动：同时框选节点和完整位于框内的分组\n· 框选多个对象时只显示选中项，不自动高亮邻居\n· Ctrl+C / Ctrl+V：复制、粘贴选中内容到当前屏幕中心\n· 撤销或重做只恢复内容，不改变当前缩放比例和画布位置\n· 拖动节点或分组时，可互相对齐并吸附等间距，画布会显示参考提示\n· 按住 Ctrl 拖动节点或分组：关闭所有吸附，自由摆放\n· 未选节点或分组拖向目标：按对象最终相对位置从上、右、下、左自动连线\n· 节点和分组均不显示连线圆圈；选中后拖动内部可移动\n· 选中分组后，鼠标移到边缘或四角会显示缩放光标，拖动即可调整大小\n· 双击线条：直接修改或清空关系名称\n· 双击节点左上角类型：直接编辑节点类型\n· 双击节点中央名称：直接编辑节点名称\n· 双击分组左上角标题：直接编辑分组名称\n· Ctrl/Shift 单击可多选\n· 右键单击清除当前全部选择\n· 按住右键拖动：十字光标平移整个画布\n· 删除键直接删除，不弹出二次确认\n· 鼠标滚轮缩放\n\n导入飞书画板：\n· 文件 → 导出 → 飞书画板（draw.io，可编辑）\n· 在飞书桌面端打开画板，选择导入该文件\n· 导入后节点、分组和连线均为独立可编辑对象", "操作说明", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(this, "关系图打开后始终可以直接编辑。\n\n操作方法：\n· 画布不受默认尺寸边界限制，可向任意方向平移和摆放内容\n· 适合窗口会自动显示当前全部内容\n· Ctrl+F 查找节点、分组和关系文字；重复回车查找下一个\n· Ctrl+H 打开查找和替换，可替换当前所选或整张图，并支持撤销\n· 有选中节点或分组时点击＋分组：自动创建包住选中内容的外层分组\n· 没有选中节点或分组时点击＋节点或＋分组：在当前屏幕中心创建\n· 单击对象：选择并显示上下游关系\n· 节点可同时属于多个分组，分组也可位于其他分组内形成多层结构\n· 节点和分组的所属关系按当前位置自动匹配，右侧只读显示层级路径\n· 移动外层分组时，内部子分组和节点会一起移动\n· 空白处按住左键拖动：同时框选节点和完整位于框内的分组\n· 框选多个对象时只显示选中项，不自动高亮邻居\n· Ctrl+C / Ctrl+V：复制、粘贴选中内容到当前屏幕中心\n· 撤销或重做只恢复内容，不改变当前缩放比例和画布位置\n· 拖动节点或分组时，可互相对齐并吸附等间距，画布会显示参考提示\n· 按住 Ctrl 拖动节点或分组：关闭所有吸附，自由摆放\n· 未选节点或分组拖向目标：按对象最终相对位置从上、右、下、左自动连线\n· 节点和分组均不显示连线圆圈；选中后拖动内部可移动\n· 选中分组后，鼠标移到边缘或四角会显示缩放光标，拖动即可调整大小\n· 双击线条：直接修改或清空关系名称\n· 双击节点左上角类型：直接编辑节点类型\n· 双击节点中央名称：直接编辑节点名称\n· 双击分组左上角标题：直接编辑分组名称\n· Ctrl/Shift 单击可多选\n· 右键单击清除当前全部选择\n· 按住右键拖动：十字光标平移整个画布\n· 删除键直接删除，不弹出二次确认\n· 鼠标滚轮缩放\n\n导入飞书画板：\n· 文件 → 导出 → 飞书画板（draw.io，可编辑）\n· 在飞书桌面端打开画板，选择导入该文件\n· 导入后节点、分组和连线均为独立可编辑对象", "操作说明", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
-        private void ShowAbout() { MessageBox.Show(this, "关系图编辑器 4.4.0\n\n纯原生 Windows 桌面程序\nC# / WinForms / GDI+\n\n不使用浏览器、不启动网页服务、不以 HTML 作为运行底层。\n\n有任何问题或建议，请联系WZC", "关于", MessageBoxButtons.OK, MessageBoxIcon.Information); }
+        private void ShowAbout() { MessageBox.Show(this, "关系图编辑器 4.5.1\n\n纯原生 Windows 桌面程序\nC# / WinForms / GDI+\n\n不使用浏览器、不启动网页服务、不以 HTML 作为运行底层。\n\n有任何问题或建议，请联系WZC", "关于", MessageBoxButtons.OK, MessageBoxIcon.Information); }
         private void ShowError(string title, Exception error) { MessageBox.Show(this, error.Message, title, MessageBoxButtons.OK, MessageBoxIcon.Error); }
     }
 
