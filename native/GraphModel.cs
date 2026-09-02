@@ -115,8 +115,6 @@ namespace RelationshipGraphNative
         public const int MaxEdges = 7500;
         public const float MaxItemDimension = 1000000f;
         public const float MaxCoordinate = 100000000f;
-        private static readonly JavaScriptSerializer Serializer = CreateSerializer();
-
         private static JavaScriptSerializer CreateSerializer()
         {
             JavaScriptSerializer serializer = new JavaScriptSerializer();
@@ -130,6 +128,38 @@ namespace RelationshipGraphNative
             return Deserialize(Serialize(graph, false));
         }
 
+        public static GraphDocument CreateImmutableSnapshot(GraphDocument graph)
+        {
+            if (graph == null) return null;
+            GraphDocument snapshot = new GraphDocument();
+            snapshot.version = graph.version;
+            GraphMeta meta = graph.meta ?? new GraphMeta();
+            snapshot.meta = new GraphMeta { title = meta.title, diagramType = meta.diagramType, canvasWidth = meta.canvasWidth, canvasHeight = meta.canvasHeight, updatedAt = meta.updatedAt };
+            GraphSettings settings = graph.settings ?? DefaultSettings();
+            snapshot.settings = new GraphSettings
+            {
+                theme = settings.theme,
+                colors = settings.colors == null ? new Dictionary<string, string>() : new Dictionary<string, string>(settings.colors, StringComparer.Ordinal),
+                relationTypes = (settings.relationTypes ?? new List<RelationType>()).Select(delegate(RelationType item)
+                {
+                    return item == null ? null : new RelationType { id = item.id, label = item.label, color = item.color };
+                }).Where(delegate(RelationType item) { return item != null; }).ToList()
+            };
+            snapshot.groups = (graph.groups ?? new List<GraphGroup>()).Select(delegate(GraphGroup group)
+            {
+                return group == null ? null : new GraphGroup { id = group.id, label = group.label, groups = group.groups == null ? new List<string>() : new List<string>(group.groups), x = group.x, y = group.y, w = group.w, h = group.h };
+            }).Where(delegate(GraphGroup group) { return group != null; }).ToList();
+            snapshot.nodes = (graph.nodes ?? new List<GraphNode>()).Select(delegate(GraphNode node)
+            {
+                return node == null ? null : new GraphNode { id = node.id, label = node.label, type = node.type, kind = node.kind, shape = node.shape, group = node.group, groups = node.groups == null ? new List<string>() : new List<string>(node.groups), x = node.x, y = node.y, w = node.w, h = node.h, note = node.note };
+            }).Where(delegate(GraphNode node) { return node != null; }).ToList();
+            snapshot.edges = (graph.edges ?? new List<GraphEdge>()).Select(delegate(GraphEdge edge)
+            {
+                return edge == null ? null : new GraphEdge { id = edge.id, source = edge.source, target = edge.target, sourceType = edge.sourceType, targetType = edge.targetType, label = edge.label, category = edge.category, lineType = edge.lineType, sourceSide = edge.sourceSide, targetSide = edge.targetSide };
+            }).Where(delegate(GraphEdge edge) { return edge != null; }).ToList();
+            return snapshot;
+        }
+
         public static string SerializeClipboard(GraphClipboardPayload payload)
         {
             if (payload == null) throw new InvalidDataException("没有可复制的内容。");
@@ -139,13 +169,13 @@ namespace RelationshipGraphNative
             if (payload.edges == null) payload.edges = new List<GraphEdge>();
             if (payload.selectedGroupIds == null) payload.selectedGroupIds = new List<string>();
             if (payload.selectedNodeIds == null) payload.selectedNodeIds = new List<string>();
-            return Serializer.Serialize(payload);
+            return CreateSerializer().Serialize(payload);
         }
 
         public static GraphClipboardPayload DeserializeClipboard(string json)
         {
             if (String.IsNullOrWhiteSpace(json) || json.Length > 16 * 1024 * 1024) throw new InvalidDataException("剪贴板中没有可粘贴的关系图内容。");
-            GraphClipboardPayload payload = Serializer.Deserialize<GraphClipboardPayload>(json);
+            GraphClipboardPayload payload = CreateSerializer().Deserialize<GraphClipboardPayload>(json);
             if (payload == null || payload.format != ClipboardFormat) throw new InvalidDataException("剪贴板中的内容不是关系图选中项。");
             if (payload.groups == null) payload.groups = new List<GraphGroup>();
             if (payload.nodes == null) payload.nodes = new List<GraphNode>();
@@ -159,18 +189,30 @@ namespace RelationshipGraphNative
 
         public static string Serialize(GraphDocument graph, bool pretty)
         {
-            string json = Serializer.Serialize(graph);
+            string json = CreateSerializer().Serialize(graph);
             return pretty ? PrettyJson(json) : json;
         }
 
         public static GraphDocument Deserialize(string json)
         {
-            GraphDocument graph = Serializer.Deserialize<GraphDocument>(json);
+            GraphDocument graph = CreateSerializer().Deserialize<GraphDocument>(json);
             return Normalize(graph);
         }
 
         public static GraphDocument LoadFile(string fileName)
         {
+            string notice;
+            return LoadFile(fileName, out notice);
+        }
+
+        public static GraphDocument LoadFile(string fileName, out string notice)
+        {
+            return LoadFile(fileName, null, out notice);
+        }
+
+        public static GraphDocument LoadFile(string fileName, int? drawioPageIndex, out string notice)
+        {
+            notice = "";
             if (new FileInfo(fileName).Length > 64L * 1024L * 1024L) throw new InvalidDataException("关系图文件超过 64 MB，无法安全导入。");
             string text = File.ReadAllText(fileName, Encoding.UTF8);
             string trimmed = text.TrimStart('\uFEFF', ' ', '\t', '\r', '\n');
@@ -181,7 +223,34 @@ namespace RelationshipGraphNative
             {
                 return Deserialize(ExtractReadonlyJson(text));
             }
+            string extension = Path.GetExtension(fileName);
+            if (extension.Equals(".drawio", StringComparison.OrdinalIgnoreCase) ||
+                extension.Equals(".xml", StringComparison.OrdinalIgnoreCase) ||
+                NativeDrawioImport.LooksLikeDrawio(fileName, trimmed))
+            {
+                return drawioPageIndex.HasValue
+                    ? NativeDrawioImport.ImportPage(text, Path.GetFileNameWithoutExtension(fileName), drawioPageIndex.Value, out notice)
+                    : NativeDrawioImport.Import(text, Path.GetFileNameWithoutExtension(fileName), out notice);
+            }
             return Deserialize(text);
+        }
+
+        public static IList<DrawioPageInfo> GetDrawioPageInfos(string fileName)
+        {
+            if (new FileInfo(fileName).Length > 64L * 1024L * 1024L) throw new InvalidDataException("关系图文件超过 64 MB，无法安全导入。");
+            string text = File.ReadAllText(fileName, Encoding.UTF8);
+            if (!NativeDrawioImport.LooksLikeDrawio(fileName, text)) throw new InvalidDataException("该文件不是有效的 Draw.io 图。");
+            return NativeDrawioImport.GetPageInfos(text, Path.GetFileNameWithoutExtension(fileName));
+        }
+
+        public static bool TryGetDrawioPageInfos(string fileName, out IList<DrawioPageInfo> pages)
+        {
+            pages = null;
+            if (new FileInfo(fileName).Length > 64L * 1024L * 1024L) throw new InvalidDataException("关系图文件超过 64 MB，无法安全导入。");
+            string text = File.ReadAllText(fileName, Encoding.UTF8);
+            if (!NativeDrawioImport.LooksLikeDrawio(fileName, text)) return false;
+            pages = NativeDrawioImport.GetPageInfos(text, Path.GetFileNameWithoutExtension(fileName));
+            return true;
         }
 
         public static string ExtractReadonlyJson(string html)
@@ -397,7 +466,7 @@ namespace RelationshipGraphNative
         }
 
         public static string EndpointKey(string type, string id) { return (type == "group" ? "group" : "node") + ":" + (id ?? ""); }
-        public static string NormalizeLineType(string value) { return value == "straight" || value == "polyline" || value == "curve" ? value : "curve"; }
+        public static string NormalizeLineType(string value) { return value == "auto" || value == "straight" || value == "polyline" || value == "curve" ? value : "curve"; }
         public static string NormalizeSide(string value) { return value == "top" || value == "right" || value == "bottom" || value == "left" ? value : ""; }
 
         public static string UniqueId(string preferred, ICollection<string> used)

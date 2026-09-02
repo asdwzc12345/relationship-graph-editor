@@ -19,6 +19,8 @@ namespace RelationshipGraphNative
         private readonly ToolStripStatusLabel _statusText = new ToolStripStatusLabel();
         private readonly ToolStripStatusLabel _countText = new ToolStripStatusLabel();
         private readonly ToolStripStatusLabel _zoomText = new ToolStripStatusLabel();
+        private readonly ToolStripProgressBar _workProgress = new ToolStripProgressBar();
+        private readonly ToolStripStatusLabel _cancelWork = new ToolStripStatusLabel("取消");
         private readonly ToolStripButton _undoButton = new ToolStripButton("撤销");
         private readonly ToolStripButton _redoButton = new ToolStripButton("重做");
         private readonly ToolStripComboBox _lineTypeBox = new ToolStripComboBox();
@@ -36,6 +38,17 @@ namespace RelationshipGraphNative
         private string _currentFile = "";
         private string _autosavePath;
         private AutosaveStore _autosaveStore;
+        private RecentFileStore _recentFileStore;
+        private readonly object _autosaveSync = new object();
+        private Exception _lastAutosaveError;
+        private BackgroundWorkQueue _backgroundWork;
+        private DebouncedSaveQueue<GraphDocument> _autosaveQueue;
+        private DebouncedSaveQueue<RoutingSnapshot> _routingQueue;
+        private int _routingRevision;
+        private long _activeWorkId;
+        private Action<BackgroundWorkCompletedEventArgs> _activeWorkCompletion;
+        private bool _servicesDisposed;
+        private readonly int _uiThreadId;
         private string _themePreferencePath;
         private string _themeMode = "system";
         private bool _darkTheme;
@@ -50,6 +63,8 @@ namespace RelationshipGraphNative
         private ToolStripMenuItem _systemThemeItem;
         private ToolStripMenuItem _lightThemeItem;
         private ToolStripMenuItem _darkThemeItem;
+        private ToolStripMenuItem _miniMapItem;
+        private ToolStripMenuItem _recentFilesItem;
         private ReplaceDialog _replaceDialog;
 
         private sealed class GraphSearchTarget
@@ -59,12 +74,22 @@ namespace RelationshipGraphNative
             public string Label;
         }
 
-        public MainForm() : this(null, true) { }
-
-        internal MainForm(GraphDocument initialGraph, bool autosaveEnabled)
+        private sealed class RoutingSnapshot
         {
+            public int Revision;
+            public GraphDocument Document;
+        }
+
+        public MainForm() : this(null, true, null) { }
+
+        internal MainForm(GraphDocument initialGraph, bool autosaveEnabled) : this(initialGraph, autosaveEnabled, null) { }
+
+        internal MainForm(GraphDocument initialGraph, bool autosaveEnabled, string recentFileStorePath)
+        {
+            _uiThreadId = System.Threading.Thread.CurrentThread.ManagedThreadId;
             _autosaveEnabled = autosaveEnabled;
             Text = "关系图编辑器";
+            AccessibleName = "关系图编辑器主窗口";
             Icon = NativeAppIcon.Create();
             ShowIcon = true;
             AutoScaleMode = AutoScaleMode.Dpi;
@@ -80,8 +105,19 @@ namespace RelationshipGraphNative
             string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
             _autosavePath = Path.Combine(local, "Relationship Studio", "autosave-native.json");
             _autosaveStore = new AutosaveStore(_autosavePath);
+            _recentFileStore = new RecentFileStore(String.IsNullOrWhiteSpace(recentFileStorePath) ? Path.Combine(local, "Relationship Studio", "recent-files.txt") : recentFileStorePath);
             _themePreferencePath = Path.Combine(local, "Relationship Studio", "theme.txt");
             _themeMode = LoadThemePreference();
+            _backgroundWork = new BackgroundWorkQueue("RelationshipGraph.UserWork");
+            _backgroundWork.ProgressChanged += BackgroundWorkProgressChanged;
+            _backgroundWork.WorkCompleted += BackgroundWorkCompleted;
+            if (_autosaveEnabled)
+            {
+                _autosaveQueue = new DebouncedSaveQueue<GraphDocument>(TimeSpan.FromMilliseconds(900), SaveAutosaveSnapshot);
+                _autosaveQueue.ProgressChanged += AutosaveProgressChanged;
+                _autosaveQueue.SaveCompleted += AutosaveCompleted;
+            }
+            _routingQueue = new DebouncedSaveQueue<RoutingSnapshot>(TimeSpan.FromMilliseconds(350), CalculateRoutingSnapshot);
 
             MenuStrip menu = BuildMenu(); _menu = menu;
             ToolStrip tools = BuildToolbar(); _tools = tools;
@@ -95,7 +131,9 @@ namespace RelationshipGraphNative
             split.Panel2.Controls.Add(_inspector);
             _canvas.Dock = DockStyle.Fill;
             _flowchartPalette.Dock = DockStyle.Left; _flowchartPalette.Width = 220; _flowchartPalette.AutoScroll = true; _flowchartPalette.Padding = new Padding(16, 20, 16, 20); _flowchartPalette.Visible = false;
+            _flowchartPalette.AccessibleName = "流程图组件库";
             _inspector.Dock = DockStyle.Fill;
+            _inspector.AccessibleName = "属性面板";
             _inspector.AutoScroll = true;
             _inspector.BackColor = Color.White;
             _inspector.Padding = new Padding(InspectorLeft, 24, InspectorRight, 24);
@@ -118,9 +156,9 @@ namespace RelationshipGraphNative
                 split.SplitterDistance = available - inspectorWidth;
             };
             split.SizeChanged += delegate { initializeSplitter(); };
-            Shown += delegate { initializeSplitter(); };
+            Shown += delegate { initializeSplitter(); QueueRoutingRefresh(); };
 
-            _canvas.NewLineType = "curve";
+            _canvas.NewLineType = "auto";
             _canvas.FocusDirection = "all";
             _canvas.FocusDepth = 1;
             _inspectorSaveTimer.Interval = 450;
@@ -133,7 +171,10 @@ namespace RelationshipGraphNative
             _canvas.DragEnter += delegate(object sender, DragEventArgs e) { if (IsFlowchart && e.Data.GetDataPresent("FlowchartShape")) e.Effect = DragDropEffects.Copy; };
             _canvas.DragDrop += delegate(object sender, DragEventArgs e) { string shape = e.Data.GetData("FlowchartShape") as string; if (IsFlowchart && !String.IsNullOrEmpty(shape)) AddNodeAt(_canvas.ClientPointToWorld(_canvas.PointToClient(new Point(e.X, e.Y))), "已从组件库添加流程图形", shape); };
             FormClosing += MainFormClosing;
-            FormClosed += delegate { _inspectorSaveTimer.Dispose(); };
+            FormClosed += delegate
+            {
+                DisposeServices();
+            };
             KeyDown += MainFormKeyDown;
 
             string startupMessage = "原生关系图已打开";
@@ -161,8 +202,12 @@ namespace RelationshipGraphNative
             file.DropDownItems.Add(MenuItem("新建流程图", Keys.Control | Keys.Shift | Keys.N, NewFlowchart));
             file.DropDownItems.Add(MenuItem("恢复默认测试用图", Keys.None, RestoreDefault));
             file.DropDownItems.Add(new ToolStripSeparator());
-            file.DropDownItems.Add(MenuItem("导入 JSON / 只读可视图…", Keys.Control | Keys.O, OpenGraph));
-            file.DropDownItems.Add(MenuItem("保存 JSON…", Keys.Control | Keys.S, delegate { SaveJson(); }));
+            file.DropDownItems.Add(MenuItem("导入 JSON / Draw.io / 只读可视图…", Keys.Control | Keys.O, OpenGraph));
+            _recentFilesItem = new ToolStripMenuItem("最近文件");
+            _recentFilesItem.DropDownOpening += delegate { RebuildRecentFilesMenu(); };
+            file.DropDownItems.Add(_recentFilesItem);
+            file.DropDownItems.Add(MenuItem("保存 JSON", Keys.Control | Keys.S, delegate { SaveJson(); }));
+            file.DropDownItems.Add(MenuItem("另存为…", Keys.Control | Keys.Shift | Keys.S, delegate { SaveJson(true); }));
             file.DropDownItems.Add(new ToolStripSeparator());
             ToolStripMenuItem export = new ToolStripMenuItem("导出");
             export.DropDownItems.Add(MenuItem("飞书画板（draw.io，可编辑）…", Keys.None, ExportFeishuBoard));
@@ -187,14 +232,20 @@ namespace RelationshipGraphNative
             edit.DropDownItems.Add(copy); edit.DropDownItems.Add(paste);
             edit.DropDownItems.Add(new ToolStripSeparator());
             edit.DropDownItems.Add(MenuItem("新增分组", Keys.Control | Keys.G, AddGroup));
-            edit.DropDownItems.Add(MenuItem("新增节点", Keys.Control | Keys.Shift | Keys.N, AddNode));
+            edit.DropDownItems.Add(MenuItem("新增节点", Keys.Insert, AddNode));
             edit.DropDownItems.Add(MenuItem("新增关系…", Keys.Control | Keys.L, AddRelation));
             edit.DropDownItems.Add(MenuItem("删除选中项", Keys.Delete, DeleteSelected));
 
             ToolStripMenuItem view = new ToolStripMenuItem("视图(&V)");
+            view.DropDownItems.Add(MenuItem("自动排版", Keys.Control | Keys.Shift | Keys.L, RunAutomaticLayout));
+            view.DropDownItems.Add(new ToolStripSeparator());
             view.DropDownItems.Add(MenuItem("适合窗口", Keys.Control | Keys.D0, delegate { _canvas.FitToView(); }));
             view.DropDownItems.Add(MenuItem("放大", Keys.Control | Keys.Oemplus, delegate { _canvas.ZoomBy(1.18f); }));
             view.DropDownItems.Add(MenuItem("缩小", Keys.Control | Keys.OemMinus, delegate { _canvas.ZoomBy(.85f); }));
+            view.DropDownItems.Add(new ToolStripSeparator());
+            _miniMapItem = new ToolStripMenuItem("显示小地图") { Checked = true, CheckOnClick = true, ShortcutKeys = Keys.Control | Keys.M };
+            _miniMapItem.Click += delegate { _canvas.ShowMiniMap = _miniMapItem.Checked; };
+            view.DropDownItems.Add(_miniMapItem);
             view.DropDownItems.Add(new ToolStripSeparator());
             ToolStripMenuItem theme = new ToolStripMenuItem("界面主题");
             _systemThemeItem = MenuItem("跟随系统", Keys.None, delegate { ChangeTheme("system"); });
@@ -220,28 +271,39 @@ namespace RelationshipGraphNative
             _undoButton.Click += delegate { Undo(); }; _redoButton.Click += delegate { Redo(); };
 
             ToolStripButton addGroup = new ToolStripButton("＋分组"); addGroup.Click += delegate { AddGroup(); };
-            ToolStripButton addNode = new ToolStripButton("＋节点"); addNode.Click += delegate { if (!IsFlowchart) AddNode(); else _statusText.Text = "请从右侧组件库拖入流程图形"; };
+            ToolStripButton addNode = new ToolStripButton("＋节点"); addNode.Click += delegate { if (!IsFlowchart) AddNode(); else _statusText.Text = "请从左侧组件库选择或拖入流程图形"; };
+            ToolStripButton autoLayout = new ToolStripButton("自动排版"); autoLayout.Click += delegate { RunAutomaticLayout(); };
             ToolStripButton fit = new ToolStripButton("适合窗口"); fit.Click += delegate { _canvas.FitToView(); };
             ToolStripButton zoomOut = new ToolStripButton("－"); zoomOut.Click += delegate { _canvas.ZoomBy(.85f); };
             ToolStripButton zoomIn = new ToolStripButton("＋"); zoomIn.Click += delegate { _canvas.ZoomBy(1.18f); };
+            addGroup.AccessibleName = "新增分组"; addNode.AccessibleName = "新增节点";
+            autoLayout.AccessibleName = "自动排版"; autoLayout.ToolTipText = "分层排列并自动避让连线与标签（Ctrl+Shift+L）";
+            fit.AccessibleName = "适合窗口"; zoomOut.AccessibleName = "缩小画布"; zoomIn.AccessibleName = "放大画布";
+            addGroup.ToolTipText = "在视野中心新增分组"; addNode.ToolTipText = "在视野中心新增节点";
+            fit.ToolTipText = "显示全部内容（Ctrl+0）"; zoomOut.ToolTipText = "缩小"; zoomIn.ToolTipText = "放大";
 
             _lineTypeBox.AutoSize = false; _lineTypeBox.DropDownStyle = ComboBoxStyle.DropDownList; _lineTypeBox.Width = 100; _lineTypeBox.DropDownWidth = 120;
-            _lineTypeBox.Items.AddRange(new object[] { "曲线", "直线", "折线" }); _lineTypeBox.SelectedIndex = 0;
+            _lineTypeBox.AccessibleName = "新关系线型";
+            _lineTypeBox.Items.AddRange(new object[] { "自动避障", "曲线", "直线", "折线" }); _lineTypeBox.SelectedIndex = 0;
             _lineTypeBox.SelectedIndexChanged += delegate { _canvas.NewLineType = LineTypeAt(_lineTypeBox.SelectedIndex); };
             _directionBox.AutoSize = false; _directionBox.DropDownStyle = ComboBoxStyle.DropDownList; _directionBox.Width = 112; _directionBox.DropDownWidth = 132;
+            _directionBox.AccessibleName = "关系高亮方向";
             _directionBox.Items.AddRange(new object[] { "上下游", "仅上游", "仅下游" }); _directionBox.SelectedIndex = 0;
             _directionBox.SelectedIndexChanged += delegate { _canvas.FocusDirection = _directionBox.SelectedIndex == 1 ? "upstream" : _directionBox.SelectedIndex == 2 ? "downstream" : "all"; _canvas.Invalidate(); };
             _depthBox.AutoSize = false; _depthBox.DropDownStyle = ComboBoxStyle.DropDownList; _depthBox.Width = 72; _depthBox.DropDownWidth = 86;
+            _depthBox.AccessibleName = "关系高亮层数";
             _depthBox.Items.AddRange(new object[] { "1层", "2层", "3层" }); _depthBox.SelectedIndex = 0;
             _depthBox.SelectedIndexChanged += delegate { _canvas.FocusDepth = _depthBox.SelectedIndex + 1; _canvas.Invalidate(); };
             _themeBox.AutoSize = false; _themeBox.DropDownStyle = ComboBoxStyle.DropDownList; _themeBox.Width = 128; _themeBox.DropDownWidth = 148;
+            _themeBox.AccessibleName = "界面主题";
             _themeBox.Items.AddRange(new object[] { "跟随系统", "浅色", "深色" }); _themeBox.SelectedIndex = ThemeIndex(_themeMode);
             _themeBox.SelectedIndexChanged += delegate { if (!_settingUi) ChangeTheme(ThemeAt(_themeBox.SelectedIndex)); };
             _searchBox.AutoSize = false; _searchBox.Width = 220; _searchBox.ToolTipText = "输入节点、分组或关系文字，按回车查找下一个";
+            _searchBox.AccessibleName = "查找关系图对象";
             _searchBox.KeyDown += delegate(object sender, KeyEventArgs e) { if (e.KeyCode == Keys.Enter) { FindEntity(); e.SuppressKeyPress = true; } };
 
             tools.Items.Add(_undoButton); tools.Items.Add(_redoButton); tools.Items.Add(new ToolStripSeparator());
-            tools.Items.Add(addGroup); tools.Items.Add(addNode); tools.Items.Add(new ToolStripSeparator());
+            tools.Items.Add(addGroup); tools.Items.Add(addNode); tools.Items.Add(autoLayout); tools.Items.Add(new ToolStripSeparator());
             tools.Items.Add(new ToolStripLabel("新关系线型")); tools.Items.Add(_lineTypeBox); tools.Items.Add(new ToolStripSeparator());
             tools.Items.Add(new ToolStripLabel("高亮")); tools.Items.Add(_directionBox); tools.Items.Add(_depthBox); tools.Items.Add(new ToolStripSeparator());
             tools.Items.Add(fit); tools.Items.Add(zoomOut); tools.Items.Add(zoomIn); tools.Items.Add(new ToolStripSeparator());
@@ -259,7 +321,15 @@ namespace RelationshipGraphNative
         {
             StatusStrip status = new StatusStrip();
             _statusText.Spring = true; _statusText.TextAlign = ContentAlignment.MiddleLeft;
-            status.Items.Add(_statusText); status.Items.Add(_countText); status.Items.Add(new ToolStripStatusLabel("  ")); status.Items.Add(_zoomText);
+            _workProgress.Minimum = 0; _workProgress.Maximum = 100; _workProgress.Width = 150; _workProgress.Visible = false;
+            _workProgress.AccessibleName = "后台操作进度"; _workProgress.ToolTipText = "当前后台操作完成百分比";
+            _cancelWork.IsLink = true; _cancelWork.Visible = false; _cancelWork.ToolTipText = "取消当前后台操作（Esc）"; _cancelWork.AccessibleName = "取消当前后台操作，快捷键 Escape";
+            _cancelWork.Click += delegate
+            {
+                RequestBackgroundCancellation();
+            };
+            status.Items.Add(_statusText); status.Items.Add(_workProgress); status.Items.Add(_cancelWork);
+            status.Items.Add(_countText); status.Items.Add(new ToolStripStatusLabel("  ")); status.Items.Add(_zoomText);
             return status;
         }
 
@@ -344,6 +414,21 @@ namespace RelationshipGraphNative
             base.OnHandleCreated(e); NativeTheme.ApplyWindowDarkMode(this, _darkTheme);
         }
 
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) DisposeServices();
+            base.Dispose(disposing);
+        }
+
+        private void DisposeServices()
+        {
+            if (_servicesDisposed) return; _servicesDisposed = true;
+            _inspectorSaveTimer.Dispose();
+            if (_autosaveQueue != null) _autosaveQueue.Dispose();
+            if (_routingQueue != null) _routingQueue.Dispose();
+            if (_backgroundWork != null) _backgroundWork.Dispose();
+        }
+
         protected override void WndProc(ref Message message)
         {
             base.WndProc(ref message);
@@ -359,6 +444,7 @@ namespace RelationshipGraphNative
             if (!String.IsNullOrEmpty(e.BeforeJson)) _undo.PushSerialized(e.BeforeJson);
             else if (e.Before != null) _undo.Push(e.Before);
             _redo.Clear(); MarkDirty(); bool autosaved = SaveAutosave(); RebuildInspector(); UpdateStatus();
+            QueueRoutingRefresh();
             if (autosaved) _statusText.Text = e.Message;
         }
 
@@ -366,7 +452,7 @@ namespace RelationshipGraphNative
         {
             _canvas.Document.meta.updatedAt = DateTime.UtcNow.ToString("o");
             _canvas.RefreshDocument(); _undo.PushSerialized(beforeJson); _redo.Clear(); MarkDirty(); bool autosaved = SaveAutosave();
-            RebuildInspector(); UpdateStatus(); if (autosaved) _statusText.Text = message;
+            RebuildInspector(); UpdateStatus(); QueueRoutingRefresh(); if (autosaved) _statusText.Text = message;
         }
 
         private void ApplyInspectorChange(Control source, Action apply, string message)
@@ -378,12 +464,13 @@ namespace RelationshipGraphNative
                 _pendingInspectorBeforeJson = GraphSerialization.Serialize(_canvas.Document, false);
                 _pendingInspectorSource = source;
             }
+            _canvas.ClearAutomaticRouting();
             apply();
             _canvas.Document.meta.updatedAt = DateTime.UtcNow.ToString("o");
             MarkDirty(); UpdateTitle();
             _pendingInspectorMessage = message;
             _canvas.Invalidate(); UpdateStatus();
-            _statusText.Text = "已自动应用，正在保存…";
+            _statusText.Text = "已应用，正在后台更新恢复副本…";
             _inspectorSaveTimer.Stop(); _inspectorSaveTimer.Start();
         }
 
@@ -394,7 +481,8 @@ namespace RelationshipGraphNative
             string beforeJson = _pendingInspectorBeforeJson; string message = _pendingInspectorMessage;
             _pendingInspectorBeforeJson = ""; _pendingInspectorSource = null; _pendingInspectorMessage = "";
             _undo.PushSerialized(beforeJson); _redo.Clear(); bool autosaved = SaveAutosave(); UpdateStatus();
-            if (autosaved) _statusText.Text = String.IsNullOrEmpty(message) ? "属性已自动保存" : message;
+            QueueRoutingRefresh();
+            if (autosaved) _statusText.Text = String.IsNullOrEmpty(message) ? "属性已应用，恢复副本将在后台更新" : message;
         }
 
         private void BindAutoText(TextBox box, bool allowEmpty, Action<string> apply, string message)
@@ -432,6 +520,7 @@ namespace RelationshipGraphNative
             _savedDocumentFingerprint = dirty ? "" : DocumentFingerprint(_canvas.Document);
             bool autosaved = !saveAutosave || (dirty ? SaveAutosave() : ClearAutosaveSafely());
             ApplyTheme(); RebuildInspector(); UpdateStatus(); UpdateTitle();
+            QueueRoutingRefresh();
             if (autosaved) _statusText.Text = message;
         }
 
@@ -479,16 +568,14 @@ namespace RelationshipGraphNative
             try
             {
                 if (_canvas.Document == null) return true;
-                string warning = _autosaveStore.Save(GraphSerialization.Serialize(_canvas.Document, false));
-                if (!String.IsNullOrEmpty(warning))
-                {
-                    ReportStatusSafely("自动保存已完成，但恢复历史创建失败：" + warning);
-                    return false;
-                }
+                GraphDocument snapshot = GraphSerialization.CreateImmutableSnapshot(_canvas.Document);
+                lock (_autosaveSync) _lastAutosaveError = null;
+                _autosaveQueue.QueueSave(snapshot);
                 return true;
             }
             catch (Exception error)
             {
+                lock (_autosaveSync) _lastAutosaveError = error;
                 ReportStatusSafely("自动保存失败：" + PersistenceErrorMessage(error));
                 return false;
             }
@@ -520,41 +607,234 @@ namespace RelationshipGraphNative
         {
             using (OpenFileDialog dialog = new OpenFileDialog())
             {
-                dialog.Title = "导入关系图"; dialog.Filter = "关系图文件 (*.json;*.html;*.htm)|*.json;*.html;*.htm|JSON (*.json)|*.json|只读可视图 (*.html;*.htm)|*.html;*.htm|所有文件 (*.*)|*.*";
+                dialog.Title = "导入关系图"; dialog.Filter = "关系图文件 (*.json;*.drawio;*.xml;*.html;*.htm)|*.json;*.drawio;*.xml;*.html;*.htm|Draw.io 图 (*.drawio;*.xml)|*.drawio;*.xml|JSON (*.json)|*.json|只读可视图 (*.html;*.htm)|*.html;*.htm|所有文件 (*.*)|*.*";
                 if (dialog.ShowDialog(this) != DialogResult.OK) return;
-                try
-                {
-                    string selectedFile = Path.GetFullPath(dialog.FileName);
-                    GraphDocument imported = GraphSerialization.LoadFile(selectedFile);
-                    if (!EnsureCurrentDocumentCanBeReplaced()) return;
-                    if (!String.IsNullOrEmpty(_currentFile) && PathsEqual(_currentFile, selectedFile))
-                        imported = GraphSerialization.LoadFile(selectedFile);
-                    string currentFile = Path.GetExtension(selectedFile).Equals(".json", StringComparison.OrdinalIgnoreCase) ? selectedFile : "";
-                    LoadDocument(imported, "已导入 " + Path.GetFileName(selectedFile), true, currentFile, String.IsNullOrEmpty(currentFile), true);
-                }
-                catch (Exception error) { ShowError("无法导入该文件", error); }
+                BeginOpenGraph(Path.GetFullPath(dialog.FileName));
             }
+        }
+
+        private void BeginOpenGraph(string selectedFile)
+        {
+            if (String.IsNullOrWhiteSpace(selectedFile)) return;
+            string extension = Path.GetExtension(selectedFile);
+            bool knownNonDrawio = extension.Equals(".html", StringComparison.OrdinalIgnoreCase) || extension.Equals(".htm", StringComparison.OrdinalIgnoreCase);
+            if (knownNonDrawio) { StartGraphImport(selectedFile, null); return; }
+            IList<DrawioPageInfo> pages = null;
+            bool isDrawio = false;
+            StartBackgroundWork("正在读取 Draw.io 页面", delegate(BackgroundWorkContext context)
+            {
+                context.ReportProgress(10, "正在读取 Draw.io 页面目录…");
+                isDrawio = GraphSerialization.TryGetDrawioPageInfos(selectedFile, out pages);
+                context.ThrowIfCancellationRequested();
+                context.ReportProgress(100, isDrawio ? "Draw.io 页面目录读取完成" : "文件类型识别完成");
+            }, delegate(BackgroundWorkCompletedEventArgs completed)
+            {
+                if (completed.Cancelled) { _statusText.Text = "Draw.io 导入已取消"; return; }
+                if (completed.Error != null) { ShowError("无法读取 Draw.io 页面", completed.Error); return; }
+                int? pageIndex = null;
+                if (isDrawio && pages != null && pages.Count > 1)
+                {
+                    using (DrawioPageDialog pageDialog = new DrawioPageDialog(pages, _darkTheme))
+                    {
+                        if (pageDialog.ShowDialog(this) != DialogResult.OK) { _statusText.Text = "Draw.io 导入已取消"; return; }
+                        pageIndex = pageDialog.SelectedPageIndex;
+                    }
+                }
+                StartGraphImport(selectedFile, pageIndex);
+            });
+        }
+
+        private void StartGraphImport(string selectedFile, int? drawioPageIndex)
+        {
+            if (!EnsureCurrentDocumentCanBeReplaced()) return;
+            GraphDocument imported = null; string importNotice = "";
+            StartBackgroundWork("正在导入 " + Path.GetFileName(selectedFile), delegate(BackgroundWorkContext context)
+            {
+                context.ReportProgress(5, "正在读取文件…");
+                context.ThrowIfCancellationRequested();
+                imported = GraphSerialization.LoadFile(selectedFile, drawioPageIndex, out importNotice);
+                context.ThrowIfCancellationRequested();
+                context.ReportProgress(100, "文件解析完成，正在更新画布…");
+            }, delegate(BackgroundWorkCompletedEventArgs completed)
+            {
+                if (completed.Cancelled) { _statusText.Text = "导入已取消"; return; }
+                if (completed.Error != null) { ShowError("无法导入该文件", completed.Error); return; }
+                string currentFile = Path.GetExtension(selectedFile).Equals(".json", StringComparison.OrdinalIgnoreCase) ? selectedFile : "";
+                string status = "已导入 " + Path.GetFileName(selectedFile);
+                if (!String.IsNullOrWhiteSpace(importNotice)) status += "；" + importNotice;
+                LoadDocument(imported, status, true, currentFile, String.IsNullOrEmpty(currentFile), true);
+                RememberRecentFile(selectedFile);
+            });
+        }
+
+        private void SaveAutosaveSnapshot(GraphDocument snapshot, BackgroundWorkContext context)
+        {
+            if (snapshot == null) return;
+            context.ReportProgress(10, "正在准备自动恢复副本…");
+            string warning = "";
+            try
+            {
+                string json = GraphSerialization.Serialize(snapshot, false);
+                context.ThrowIfCancellationRequested();
+                lock (_autosaveSync)
+                {
+                    warning = _autosaveStore.Save(json);
+                    _lastAutosaveError = null;
+                }
+            }
+            catch (Exception error)
+            {
+                lock (_autosaveSync) _lastAutosaveError = error;
+                throw;
+            }
+            context.ThrowIfCancellationRequested();
+            context.ReportProgress(100, String.IsNullOrEmpty(warning) ? "自动恢复副本已更新" : "自动恢复副本已更新，但历史版本创建失败：" + warning);
+        }
+
+        private void AutosaveProgressChanged(object sender, BackgroundWorkProgressEventArgs e)
+        {
+            if (e.Percentage >= 100 && !String.IsNullOrWhiteSpace(e.Message) && e.Message.IndexOf("失败", StringComparison.Ordinal) >= 0)
+                ReportStatusSafely(e.Message);
+        }
+
+        private void AutosaveCompleted(object sender, BackgroundWorkCompletedEventArgs e)
+        {
+            if (e.Error != null)
+            {
+                lock (_autosaveSync) _lastAutosaveError = e.Error;
+                ReportStatusSafely("自动恢复副本保存失败：" + PersistenceErrorMessage(e.Error));
+            }
+        }
+
+        private void QueueRoutingRefresh()
+        {
+            if (_routingQueue == null || _canvas.Document == null || IsDisposed) return;
+            _routingRevision++;
+            _routingQueue.QueueSave(new RoutingSnapshot { Revision = _routingRevision, Document = GraphSerialization.CreateImmutableSnapshot(_canvas.Document) });
+        }
+
+        private void CalculateRoutingSnapshot(RoutingSnapshot snapshot, BackgroundWorkContext context)
+        {
+            if (snapshot == null || snapshot.Document == null) return;
+            context.ThrowIfCancellationRequested();
+            GraphLayoutOptions options = GraphLayoutOptions.ForDocument(snapshot.Document);
+            options.CancellationRequested = delegate { return context.IsCancellationRequested; };
+            GraphLayoutResult result = GraphLayout.CalculateRoutes(snapshot.Document, options);
+            context.ThrowIfCancellationRequested();
+            if (IsDisposed || Disposing || !IsHandleCreated) return;
+            try
+            {
+                BeginInvoke((Action)delegate
+                {
+                    if (!IsDisposed && snapshot.Revision == _routingRevision) _canvas.SetAutomaticRouting(result);
+                });
+            }
+            catch { }
+        }
+
+        private bool RememberRecentFile(string fileName)
+        {
+            if (_recentFileStore == null || String.IsNullOrWhiteSpace(fileName)) return false;
+            if (!_recentFileStore.Add(fileName))
+            {
+                ReportStatusSafely("最近文件记录失败：" + PersistenceErrorMessage(_recentFileStore.LastError));
+                return false;
+            }
+            RebuildRecentFilesMenu();
+            return true;
+        }
+
+        private void RebuildRecentFilesMenu()
+        {
+            if (_recentFilesItem == null || _recentFileStore == null) return;
+            _recentFilesItem.DropDownItems.Clear();
+            IList<string> files = _recentFileStore.GetFiles();
+            Exception recentReadError = _recentFileStore.LastError;
+            for (int index = 0; index < files.Count; index++)
+            {
+                string path = files[index];
+                string folder = Path.GetDirectoryName(path) ?? "";
+                string text = (index < 9 ? "&" + (index + 1) : (index + 1).ToString()) + "  " + EscapeMenuText(Path.GetFileName(path));
+                if (folder.Length > 0) text += "  —  " + EscapeMenuText(folder);
+                ToolStripMenuItem item = new ToolStripMenuItem(text) { ToolTipText = path, AccessibleName = "打开最近文件 " + Path.GetFileName(path) };
+                string selectedPath = path;
+                item.Click += delegate { OpenRecentFile(selectedPath); };
+                _recentFilesItem.DropDownItems.Add(item);
+            }
+            if (files.Count == 0 && recentReadError == null) _recentFilesItem.DropDownItems.Add(new ToolStripMenuItem("没有最近文件") { Enabled = false });
+            else
+            {
+                if (files.Count > 0)
+                {
+                    _recentFilesItem.DropDownItems.Add(new ToolStripSeparator());
+                    ToolStripMenuItem clear = new ToolStripMenuItem("清空最近文件");
+                    clear.Click += delegate
+                    {
+                        if (!_recentFileStore.Clear() && _recentFileStore.LastError != null) ReportStatusSafely("最近文件清空失败：" + PersistenceErrorMessage(_recentFileStore.LastError));
+                        RebuildRecentFilesMenu();
+                    };
+                    _recentFilesItem.DropDownItems.Add(clear);
+                }
+            }
+            if (recentReadError != null)
+            {
+                _recentFilesItem.DropDownItems.Add(new ToolStripMenuItem("最近文件读取失败") { Enabled = false, ToolTipText = PersistenceErrorMessage(recentReadError) });
+                ReportStatusSafely("最近文件读取失败：" + PersistenceErrorMessage(recentReadError));
+            }
+        }
+
+        private static string EscapeMenuText(string value) { return (value ?? "").Replace("&", "&&"); }
+
+        private void OpenRecentFile(string fileName)
+        {
+            if (String.IsNullOrWhiteSpace(fileName) || !File.Exists(fileName))
+            {
+                if (_recentFileStore != null) _recentFileStore.Remove(fileName);
+                RebuildRecentFilesMenu(); _statusText.Text = "最近文件已不存在，已从列表移除"; return;
+            }
+            BeginOpenGraph(Path.GetFullPath(fileName));
         }
 
         private bool SaveJson()
         {
+            return SaveJson(false);
+        }
+
+        private bool SaveJson(bool forceSaveAs)
+        {
             FinishPendingCanvasWork();
-            string file = _currentFile;
+            string file = forceSaveAs ? "" : _currentFile;
             if (String.IsNullOrEmpty(file))
             {
                 using (SaveFileDialog dialog = SaveDialog("JSON 关系图 (*.json)|*.json", ".json"))
-                { if (dialog.ShowDialog(this) != DialogResult.OK) return false; file = dialog.FileName; }
+                {
+                    if (forceSaveAs && !String.IsNullOrEmpty(_currentFile))
+                    {
+                        dialog.InitialDirectory = Path.GetDirectoryName(_currentFile);
+                        dialog.FileName = Path.GetFileName(_currentFile);
+                    }
+                    if (dialog.ShowDialog(this) != DialogResult.OK) return false; file = dialog.FileName;
+                }
             }
+            return SaveJsonToPath(file);
+        }
+
+        private bool SaveJsonToPath(string file)
+        {
             try
             {
                 NativeExport.SaveJson(_canvas.Document, file);
                 _currentFile = file; _savedDocumentFingerprint = DocumentFingerprint(_canvas.Document); SetDirty(false); UpdateTitle();
+                bool recentRecorded = RememberRecentFile(file);
                 bool recoveryCleared = ClearAutosaveSafely();
-                if (recoveryCleared) _statusText.Text = "JSON 已保存";
+                if (recoveryCleared) _statusText.Text = recentRecorded ? "JSON 已保存" : "JSON 已保存，但最近文件记录失败";
                 return true;
             }
             catch (Exception error) { ShowError("无法保存文件", error); return false; }
         }
+
+        internal bool SaveJsonToFileForTesting(string file) { FinishPendingCanvasWork(); return SaveJsonToPath(file); }
+        internal string CurrentFileForTesting { get { return _currentFile; } }
 
         private bool EnsureCurrentDocumentCanBeReplaced()
         {
@@ -586,19 +866,43 @@ namespace RelationshipGraphNative
 
         private void MainFormClosing(object sender, FormClosingEventArgs e)
         {
+            if (_activeWorkId != 0 && _backgroundWork != null)
+            {
+                _backgroundWork.Cancel(_activeWorkId);
+                e.Cancel = true;
+                _statusText.Text = "正在取消后台操作；完成后可安全关闭程序";
+                return;
+            }
             bool discardChanges;
             if (!EnsureCurrentDocumentCanBeReplaced(out discardChanges)) { e.Cancel = true; return; }
             if (discardChanges)
             {
-                try { _autosaveStore.ClearAll(); }
-                catch (Exception error)
+                if (!ClearAutosaveSafely())
                 {
                     e.Cancel = true;
-                    ShowError("无法清除自动恢复文件，已取消关闭", error);
+                    MessageBox.Show(this, "无法清除自动恢复文件，已取消关闭。", "无法关闭", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
                 return;
             }
-            if (_isDirty) SaveAutosave();
+            if (_isDirty)
+            {
+                SaveAutosave();
+                bool flushed = _autosaveQueue == null || _autosaveQueue.Flush(TimeSpan.FromSeconds(5));
+                Exception backgroundSaveError; lock (_autosaveSync) backgroundSaveError = _lastAutosaveError;
+                if (AutosaveNeedsSynchronousFallback(flushed, backgroundSaveError))
+                {
+                    try
+                    {
+                        string json = GraphSerialization.Serialize(GraphSerialization.CreateImmutableSnapshot(_canvas.Document), false);
+                        lock (_autosaveSync) { _autosaveStore.Save(json); _lastAutosaveError = null; }
+                    }
+                    catch (Exception error)
+                    {
+                        e.Cancel = true;
+                        ShowError("关闭前自动恢复保存失败，已取消关闭", error);
+                    }
+                }
+            }
         }
 
         private void MarkDirty() { SetDirty(true); }
@@ -632,8 +936,9 @@ namespace RelationshipGraphNative
         private void ReportStatusSafely(string message)
         {
             if (IsDisposed || Disposing) return;
-            if (InvokeRequired && IsHandleCreated)
+            if (System.Threading.Thread.CurrentThread.ManagedThreadId != _uiThreadId)
             {
+                if (!IsHandleCreated) return;
                 try { BeginInvoke((Action<string>)ReportStatusSafely, message); }
                 catch { }
                 return;
@@ -644,8 +949,93 @@ namespace RelationshipGraphNative
         private bool ClearAutosaveSafely()
         {
             if (!_autosaveEnabled) return true;
-            try { _autosaveStore.ClearAll(); return true; }
+            try
+            {
+                if (_autosaveQueue != null)
+                {
+                    _autosaveQueue.CancelAll();
+                    _autosaveQueue.Flush(TimeSpan.FromSeconds(3));
+                }
+                lock (_autosaveSync) _autosaveStore.ClearAll();
+                lock (_autosaveSync) _lastAutosaveError = null;
+                return true;
+            }
             catch (Exception error) { ReportStatusSafely("自动恢复数据清理失败：" + PersistenceErrorMessage(error)); return false; }
+        }
+
+        private bool StartBackgroundWork(string name, Action<BackgroundWorkContext> action, Action<BackgroundWorkCompletedEventArgs> completed)
+        {
+            if (_backgroundWork == null || action == null) return false;
+            if (_activeWorkId != 0)
+            {
+                _statusText.Text = "已有后台操作正在进行，可先取消或等待完成";
+                return false;
+            }
+            _activeWorkCompletion = completed;
+            try
+            {
+                _activeWorkId = _backgroundWork.Enqueue(name, action);
+                _workProgress.Value = 0; _workProgress.Visible = true; _cancelWork.Visible = true;
+                _statusText.Text = name + "…（按 Esc 取消）";
+                SetEditingEnabled(false);
+                return true;
+            }
+            catch (Exception error)
+            {
+                _activeWorkId = 0; _activeWorkCompletion = null;
+                ShowError("无法启动后台操作", error); return false;
+            }
+        }
+
+        private static bool AutosaveNeedsSynchronousFallback(bool flushed, Exception saveError) { return !flushed || saveError != null; }
+        internal static bool AutosaveNeedsSynchronousFallbackForTesting(bool flushed, Exception saveError) { return AutosaveNeedsSynchronousFallback(flushed, saveError); }
+
+        private void BackgroundWorkProgressChanged(object sender, BackgroundWorkProgressEventArgs e)
+        {
+            if (IsDisposed || Disposing || !IsHandleCreated) return;
+            try { BeginInvoke((Action<BackgroundWorkProgressEventArgs>)ApplyBackgroundProgress, e); }
+            catch { }
+        }
+
+        private void ApplyBackgroundProgress(BackgroundWorkProgressEventArgs e)
+        {
+            if (e == null || e.WorkId != _activeWorkId || IsDisposed) return;
+            _workProgress.Value = Math.Max(_workProgress.Minimum, Math.Min(_workProgress.Maximum, e.Percentage));
+            if (!String.IsNullOrWhiteSpace(e.Message)) _statusText.Text = e.Message + "（按 Esc 取消）";
+        }
+
+        private void BackgroundWorkCompleted(object sender, BackgroundWorkCompletedEventArgs e)
+        {
+            if (IsDisposed || Disposing || !IsHandleCreated) return;
+            try { BeginInvoke((Action<BackgroundWorkCompletedEventArgs>)FinishBackgroundWork, e); }
+            catch { }
+        }
+
+        private void FinishBackgroundWork(BackgroundWorkCompletedEventArgs e)
+        {
+            if (e == null || e.WorkId != _activeWorkId || IsDisposed) return;
+            Action<BackgroundWorkCompletedEventArgs> callback = _activeWorkCompletion;
+            _activeWorkCompletion = null; _activeWorkId = 0;
+            _workProgress.Visible = false; _cancelWork.Visible = false; _workProgress.Value = 0;
+            SetEditingEnabled(true);
+            if (callback != null) callback(e);
+            else if (e.Cancelled) _statusText.Text = e.Name + "已取消";
+            else if (e.Error != null) ShowError(e.Name + "失败", e.Error);
+        }
+
+        private void SetEditingEnabled(bool enabled)
+        {
+            if (_menu != null) _menu.Enabled = enabled;
+            if (_tools != null) _tools.Enabled = enabled;
+            _canvas.Enabled = enabled;
+            _inspector.Enabled = enabled;
+            _cancelWork.Enabled = !enabled;
+        }
+
+        private bool RequestBackgroundCancellation()
+        {
+            if (_activeWorkId == 0 || _backgroundWork == null || !_backgroundWork.Cancel(_activeWorkId)) return false;
+            _statusText.Text = "正在取消后台操作…"; return true;
         }
 
         private static string PersistenceErrorMessage(Exception error)
@@ -656,21 +1046,72 @@ namespace RelationshipGraphNative
             return message.Length <= 180 ? message : message.Substring(0, 177) + "...";
         }
 
-        private void ExportReadonly() { ExportWithDialog("只读可视图 (*.html)|*.html", ".html", delegate(string file) { NativeExport.SaveReadonlyHtml(_canvas.Document, file); }, "只读可视图已导出，可直接分享或重新导入"); }
-        private void ExportFeishuBoard() { ExportWithDialog("飞书画板文件 (*.drawio)|*.drawio", ".drawio", delegate(string file) { NativeExport.SaveDrawio(_canvas.Document, file); }, "飞书画板文件已导出；在飞书桌面端画板中选择导入即可编辑每个节点"); }
-        private void ExportSvg() { ExportWithDialog("SVG 矢量图 (*.svg)|*.svg", ".svg", delegate(string file) { NativeExport.SaveSvg(_canvas.Document, file); }, "SVG 已导出"); }
-        private void ExportPng() { ExportWithDialog("PNG 图片 (*.png)|*.png", ".png", delegate(string file) { NativeExport.SavePng(_canvas, file); }, "PNG 已导出"); }
-        private void ExportPdf() { ExportWithDialog("PDF 文档 (*.pdf)|*.pdf", ".pdf", delegate(string file) { NativeExport.SavePdf(_canvas, file); }, "PDF 已导出"); }
+        private void ExportReadonly() { ExportWithDialog("只读可视图 (*.html)|*.html", ".html", delegate(GraphDocument graph, bool dark, string file) { NativeExport.SaveReadonlyHtml(graph, file); }, "只读可视图已导出，可直接分享或重新导入"); }
+        private void ExportFeishuBoard() { ExportWithDialog("飞书画板文件 (*.drawio)|*.drawio", ".drawio", delegate(GraphDocument graph, bool dark, string file) { NativeExport.SaveDrawio(graph, file); }, "飞书画板文件已导出；在飞书桌面端画板中选择导入即可编辑每个节点"); }
+        private void ExportSvg() { ExportWithDialog("SVG 矢量图 (*.svg)|*.svg", ".svg", delegate(GraphDocument graph, bool dark, string file) { NativeExport.SaveSvg(graph, file); }, "SVG 已导出"); }
+        private void ExportPng() { ExportWithDialog("PNG 图片 (*.png)|*.png", ".png", delegate(GraphDocument graph, bool dark, string file) { NativeExport.SavePng(graph, dark, file); }, "PNG 已导出"); }
+        private void ExportPdf() { ExportWithDialog("PDF 文档 (*.pdf)|*.pdf", ".pdf", delegate(GraphDocument graph, bool dark, string file) { NativeExport.SavePdf(graph, file); }, "PDF 已导出"); }
 
-        private void ExportWithDialog(string filter, string extension, Action<string> exporter, string success)
+        private void ExportWithDialog(string filter, string extension, Action<GraphDocument, bool, string> exporter, string success)
         {
             FinishPendingCanvasWork();
             using (SaveFileDialog dialog = SaveDialog(filter, extension))
             {
                 if (dialog.ShowDialog(this) != DialogResult.OK) return;
-                try { exporter(dialog.FileName); _statusText.Text = success; }
-                catch (Exception error) { ShowError("导出失败", error); }
+                string targetFile = Path.GetFullPath(dialog.FileName);
+                GraphDocument snapshot = GraphSerialization.CreateImmutableSnapshot(_canvas.Document);
+                bool darkTheme = _darkTheme;
+                bool exportPublished = false;
+                StartBackgroundWork("正在导出 " + Path.GetFileName(targetFile), delegate(BackgroundWorkContext context)
+                {
+                    string folder = Path.GetDirectoryName(targetFile);
+                    string temporary = Path.Combine(folder, "." + Path.GetFileName(targetFile) + "." + Guid.NewGuid().ToString("N") + ".export-work");
+                    try
+                    {
+                        context.ReportProgress(10, "正在生成导出内容…");
+                        context.ThrowIfCancellationRequested();
+                        exporter(snapshot, darkTheme, temporary);
+                        context.ThrowIfCancellationRequested();
+                        context.ReportProgress(78, "正在安全写入目标文件…");
+                        PublishPreparedExport(temporary, targetFile, context);
+                        exportPublished = true;
+                        context.ReportProgress(100, "导出完成");
+                    }
+                    finally
+                    {
+                        try { if (File.Exists(temporary)) File.Delete(temporary); } catch { }
+                    }
+                }, delegate(BackgroundWorkCompletedEventArgs completed)
+                {
+                    if (completed.Cancelled)
+                    {
+                        _statusText.Text = exportPublished ? "导出已在取消请求生效前完成，目标文件已更新" : "导出已取消，原目标文件保持不变";
+                        return;
+                    }
+                    if (completed.Error != null) { ShowError("导出失败", completed.Error); return; }
+                    _statusText.Text = success;
+                });
             }
+        }
+
+        private static void PublishPreparedExport(string sourceFile, string targetFile, BackgroundWorkContext context)
+        {
+            FileInfo info = new FileInfo(sourceFile);
+            long total = Math.Max(1L, info.Length);
+            NativePersistence.WriteStreamAtomic(targetFile, false, delegate(Stream destination)
+            {
+                using (FileStream source = new FileStream(sourceFile, FileMode.Open, FileAccess.Read, FileShare.Read, 131072, FileOptions.SequentialScan))
+                {
+                    byte[] buffer = new byte[131072]; long copied = 0;
+                    while (true)
+                    {
+                        context.ThrowIfCancellationRequested();
+                        int count = source.Read(buffer, 0, buffer.Length); if (count <= 0) break;
+                        destination.Write(buffer, 0, count); copied += count;
+                        context.ReportProgress(78 + (int)Math.Min(20, copied * 20L / total), "正在安全写入目标文件…");
+                    }
+                }
+            }, delegate { context.ThrowIfCancellationRequested(); });
         }
 
         private SaveFileDialog SaveDialog(string filter, string extension)
@@ -694,15 +1135,51 @@ namespace RelationshipGraphNative
         {
             FinishPendingCanvasWork();
             if (_undo.Count == 0) return; _redo.Push(_canvas.Document); _canvas.RestoreDocumentPreservingView(_undo.Pop());
-            RefreshDirtyFromSavePoint(); bool autosaved = _isDirty ? SaveAutosave() : ClearAutosaveSafely(); ApplyTheme(); RebuildInspector(); UpdateStatus(); if (autosaved) _statusText.Text = "已撤销"; UpdateTitle();
+            RefreshDirtyFromSavePoint(); bool autosaved = _isDirty ? SaveAutosave() : ClearAutosaveSafely(); ApplyTheme(); RebuildInspector(); UpdateStatus(); QueueRoutingRefresh(); if (autosaved) _statusText.Text = "已撤销"; UpdateTitle();
         }
 
         private void Redo()
         {
             FinishPendingCanvasWork();
             if (_redo.Count == 0) return; _undo.Push(_canvas.Document); _canvas.RestoreDocumentPreservingView(_redo.Pop());
-            RefreshDirtyFromSavePoint(); bool autosaved = _isDirty ? SaveAutosave() : ClearAutosaveSafely(); ApplyTheme(); RebuildInspector(); UpdateStatus(); if (autosaved) _statusText.Text = "已重做"; UpdateTitle();
+            RefreshDirtyFromSavePoint(); bool autosaved = _isDirty ? SaveAutosave() : ClearAutosaveSafely(); ApplyTheme(); RebuildInspector(); UpdateStatus(); QueueRoutingRefresh(); if (autosaved) _statusText.Text = "已重做"; UpdateTitle();
         }
+
+        private void RunAutomaticLayout()
+        {
+            FinishPendingCanvasWork();
+            if (_canvas.Document == null || (_canvas.Document.nodes.Count == 0 && _canvas.Document.groups.Count == 0))
+            {
+                _statusText.Text = "当前关系图没有可排版的对象"; return;
+            }
+            string beforeJson = GraphSerialization.Serialize(_canvas.Document, false);
+            GraphDocument snapshot = GraphSerialization.CreateImmutableSnapshot(_canvas.Document);
+            GraphLayoutResult result = null;
+            StartBackgroundWork("正在自动排版", delegate(BackgroundWorkContext context)
+            {
+                context.ReportProgress(8, "正在分析关系层级…");
+                context.ThrowIfCancellationRequested();
+                GraphLayoutOptions options = GraphLayoutOptions.ForDocument(snapshot);
+                options.CancellationRequested = delegate { return context.IsCancellationRequested; };
+                options.ProgressChanged = delegate(int percentage, string message) { context.ReportProgress(percentage, message); };
+                result = GraphLayout.Calculate(snapshot, options);
+                context.ThrowIfCancellationRequested();
+                context.ReportProgress(100, "排版与避障计算完成，正在更新画布…");
+            }, delegate(BackgroundWorkCompletedEventArgs completed)
+            {
+                if (completed.Cancelled) { _statusText.Text = "自动排版已取消，画布未改变"; return; }
+                if (completed.Error != null) { ShowError("自动排版失败", completed.Error); return; }
+                if (!_canvas.ApplyAutomaticLayout(result, beforeJson)) { _statusText.Text = "自动排版没有生成可应用的结果"; return; }
+                int conflicts = result.Edges.Values.Count(delegate(GraphEdgeLayout edge) { return edge.HasObstacleConflict; });
+                string message = "自动排版完成：端口已错开，连线和标签已避让";
+                if (conflicts > 0) message += "；" + conflicts + " 条关系使用了安全回退路径";
+                if (result.Warnings.Count > 0) message += "；另有 " + result.Warnings.Count + " 条布局提示";
+                _statusText.Text = message;
+                UpdateStatus();
+            });
+        }
+
+        internal void RunAutomaticLayoutForTesting() { RunAutomaticLayout(); }
 
         private void AddGroup()
         {
@@ -785,6 +1262,30 @@ namespace RelationshipGraphNative
         internal void AddNodeForTesting() { AddNode(); }
         internal void AddNodeAtForTesting(PointF worldPoint) { AddNodeAt(worldPoint); }
         internal GraphCanvas CanvasForTesting { get { return _canvas; } }
+        internal bool FlowchartPaletteAccessibleForTesting
+        {
+            get
+            {
+                List<Button> buttons = _flowchartPalette.Controls.OfType<Button>().ToList();
+                return buttons.Count == 5 && buttons.All(delegate(Button button) { return !String.IsNullOrWhiteSpace(button.AccessibleName) && button.TabStop; });
+            }
+        }
+        internal bool AddFlowchartShapeUsingKeyboardForTesting(string shape)
+        {
+            Button button = _flowchartPalette.Controls.OfType<Button>().FirstOrDefault(delegate(Button item) { return String.Equals(item.Tag as string, shape, StringComparison.Ordinal); });
+            if (button == null) return false; int before = _canvas.Document.nodes.Count;
+            System.Reflection.MethodInfo click = button.GetType().GetMethod("OnClick", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            if (click == null) return false; click.Invoke(button, new object[] { EventArgs.Empty });
+            return _canvas.Document.nodes.Count == before + 1;
+        }
+        internal bool ToolbarAccessibleForTesting
+        {
+            get
+            {
+                return !String.IsNullOrWhiteSpace(_lineTypeBox.AccessibleName) && !String.IsNullOrWhiteSpace(_directionBox.AccessibleName) &&
+                    !String.IsNullOrWhiteSpace(_depthBox.AccessibleName) && !String.IsNullOrWhiteSpace(_themeBox.AccessibleName) && !String.IsNullOrWhiteSpace(_searchBox.AccessibleName);
+            }
+        }
 
         private void AddRelation()
         {
@@ -1070,9 +1571,12 @@ namespace RelationshipGraphNative
             int next = current < 0 ? 0 : (current + 1) % results.Count;
             GraphSearchTarget target = results[next];
             _canvas.SelectEntity(target.Type, target.Id);
+            _canvas.EnsureEntityVisible(target.Type, target.Id);
             _statusText.Text = "已定位" + EntityTypeName(target.Type) + "：" + target.Label + "（" + (next + 1) + "/" + results.Count + "）";
             SetReplaceDialogStatus("已找到第 " + (next + 1) + " 个，共 " + results.Count + " 个对象。", false);
         }
+
+        internal void FindEntityForTesting(string query) { FindEntity(query); }
 
         private static string EntityTypeName(string type)
         {
@@ -1309,8 +1813,10 @@ namespace RelationshipGraphNative
         private void AddPaletteItem(string text, string shape, ref int y)
         {
             Button button = new Button(); button.Text = ""; button.Tag = shape; button.FlatStyle = FlatStyle.Flat; button.FlatAppearance.BorderSize = 0;
+            button.AccessibleName = text; button.AccessibleDescription = "流程图组件。按 Enter 可添加到当前视野中心，也可用鼠标拖到画布。"; button.TabStop = true;
             button.SetBounds(16, y, 188, 52); button.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             button.MouseDown += delegate(object sender, MouseEventArgs e) { if (e.Button == MouseButtons.Left) button.DoDragDrop(new DataObject("FlowchartShape", shape), DragDropEffects.Copy); };
+            button.Click += delegate { if (IsFlowchart) AddNodeAt(_canvas.ViewCenterWorld, "已从组件库添加流程图形", shape); };
             button.Paint += delegate(object sender, PaintEventArgs e) { DrawPaletteShape(e.Graphics, button.ClientRectangle, shape, text); };
             _flowchartPalette.Controls.Add(button); y += 64;
         }
@@ -1336,7 +1842,7 @@ namespace RelationshipGraphNative
         {
             AddMuted("未选择对象", ref y); AddParagraph("先单击对象进行选择；再次拖动已选择的节点或分组可移动。拖动未选择的节点或分组会创建关系。右键可清除全部选择。", ref y);
             TextBox title = AddTextField("图名称", _canvas.Document.meta.title, false, ref y);
-            BindAutoText(title, false, delegate(string value) { _canvas.Document.meta.title = value; UpdateTitle(); }, "图名称已自动保存");
+            BindAutoText(title, false, delegate(string value) { _canvas.Document.meta.title = value; UpdateTitle(); }, "图名称已应用，恢复副本将在后台更新");
             AddMuted("画布不受默认尺寸边界限制，可向任意方向平移和摆放内容。\n节点可同时属于多个分组，分组也可多层嵌套；所属关系按位置自动匹配。", ref y);
         }
 
@@ -1350,11 +1856,11 @@ namespace RelationshipGraphNative
             AddMuted("仅影响节点配色，不影响节点类型、关系或功能。", ref y);
             AddLabel("所属分组（自动匹配，只读）", ref y); AddParagraph(AutomaticMembershipText(node.groups), ref y);
             TextBox note = AddTextField("备注", node.note, true, ref y);
-            BindAutoText(label, false, delegate(string value) { node.label = value; }, "节点名称已自动保存");
-            if (type != null) BindAutoText(type, false, delegate(string value) { node.type = value; }, "节点类型已自动保存");
-            BindAutoCombo(kind, delegate { ColorCategoryChoice choice = kind.SelectedItem as ColorCategoryChoice; if (choice != null) node.kind = choice.Kind; }, "节点颜色分类已自动保存");
-            if (shape != null) BindAutoCombo(shape, delegate { node.shape = ShapeAt(shape.SelectedIndex); }, "流程图形已自动保存");
-            BindAutoText(note, true, delegate(string value) { node.note = value; }, "节点备注已自动保存");
+            BindAutoText(label, false, delegate(string value) { node.label = value; }, "节点名称已应用，恢复副本将在后台更新");
+            if (type != null) BindAutoText(type, false, delegate(string value) { node.type = value; }, "节点类型已应用，恢复副本将在后台更新");
+            BindAutoCombo(kind, delegate { ColorCategoryChoice choice = kind.SelectedItem as ColorCategoryChoice; if (choice != null) node.kind = choice.Kind; }, "节点颜色分类已应用，恢复副本将在后台更新");
+            if (shape != null) BindAutoCombo(shape, delegate { node.shape = ShapeAt(shape.SelectedIndex); }, "流程图形已应用，恢复副本将在后台更新");
+            BindAutoText(note, true, delegate(string value) { node.note = value; }, "节点备注已应用，恢复副本将在后台更新");
             AddParagraph(RelationSummary("node", node.id), ref y);
         }
 
@@ -1362,7 +1868,7 @@ namespace RelationshipGraphNative
         {
             List<string> ids = _canvas.SelectedNodeIds.ToList(); AddMuted("已选择 " + ids.Count + " 个节点", ref y);
             TextBox type = AddTextField("统一类型（留空则不修改）", "", false, ref y);
-            BindAutoText(type, false, delegate(string value) { foreach (GraphNode node in _canvas.Document.nodes.Where(delegate(GraphNode item) { return ids.Contains(item.id); })) node.type = value; }, "多个节点类型已自动保存");
+            BindAutoText(type, false, delegate(string value) { foreach (GraphNode node in _canvas.Document.nodes.Where(delegate(GraphNode item) { return ids.Contains(item.id); })) node.type = value; }, "多个节点类型已应用，恢复副本将在后台更新");
             AddMuted("所属分组由节点位置自动匹配，不支持手工或批量编辑。", ref y);
         }
 
@@ -1376,7 +1882,7 @@ namespace RelationshipGraphNative
         {
             GraphGroup group = _canvas.Document.groups.FirstOrDefault(delegate(GraphGroup item) { return item.id == _canvas.SelectedId; }); if (group == null) return;
             AddMuted("分组 · " + group.id, ref y); TextBox label = AddTextField("名称", group.label, false, ref y);
-            BindAutoText(label, false, delegate(string value) { group.label = value; }, "分组名称已自动保存");
+            BindAutoText(label, false, delegate(string value) { group.label = value; }, "分组名称已应用，恢复副本将在后台更新");
             AddLabel("所属分组（自动匹配，只读）", ref y); AddParagraph(AutomaticMembershipText(group.groups), ref y);
             AddParagraph("位置 " + (int)group.x + ", " + (int)group.y + "　大小 " + (int)group.w + " × " + (int)group.h + "\n" + RelationSummary("group", group.id), ref y);
         }
@@ -1387,9 +1893,12 @@ namespace RelationshipGraphNative
             AddMuted("关系 · " + edge.id, ref y); List<EndpointItem> endpoints = Endpoints();
             ComboBox source = AddEndpointField("起点", endpoints, GraphSerialization.EndpointKey(edge.sourceType, edge.source), ref y);
             ComboBox target = AddEndpointField("终点", endpoints, GraphSerialization.EndpointKey(edge.targetType, edge.target), ref y);
+            Button swap = new Button { Text = "交换起点和终点", AccessibleName = "交换关系方向" };
+            swap.SetBounds(InspectorLeft, y, InspectorContentWidth(), 36); swap.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            swap.Click += delegate { SwapSelectedEdgeDirection(); }; _inspector.Controls.Add(swap); y += 50;
             TextBox label = AddTextField("名称（可留空）", edge.label, false, ref y);
             ComboBox category = AddComboField("关系类别", _canvas.Document.settings.relationTypes.Select(delegate(RelationType item) { return item.label; }).ToArray(), Math.Max(0, _canvas.Document.settings.relationTypes.FindIndex(delegate(RelationType item) { return item.id == edge.category; })), ref y);
-            ComboBox line = AddComboField("线型", new[] { "曲线", "直线", "折线" }, LineTypeIndex(edge.lineType), ref y);
+            ComboBox line = AddComboField("线型", new[] { "自动避障", "曲线", "直线", "折线" }, LineTypeIndex(edge.lineType), ref y);
             AddMuted("线条颜色自动跟随起点节点的颜色分类；起点颜色改变时会同步更新。", ref y);
             Action applyEndpoints = delegate
             {
@@ -1397,15 +1906,40 @@ namespace RelationshipGraphNative
                 if (s == null || t == null || s.Key == t.Key) { _statusText.Text = "起点和终点不能相同，未自动应用"; try { BeginInvoke((Action)delegate { RebuildInspector(); }); } catch { } return; }
                 bool duplicate = _canvas.Document.edges.Any(delegate(GraphEdge item) { return item.id != edge.id && GraphSerialization.EndpointKey(item.sourceType, item.source) == s.Key && GraphSerialization.EndpointKey(item.targetType, item.target) == t.Key; });
                 if (duplicate) { _statusText.Text = "同方向关系已存在，未自动应用"; try { BeginInvoke((Action)delegate { RebuildInspector(); }); } catch { } return; }
-                ApplyInspectorChange(source.ContainsFocus ? (Control)source : target, delegate { edge.sourceType = s.Type; edge.source = s.Id; edge.targetType = t.Type; edge.target = t.Id; edge.sourceSide = ""; edge.targetSide = ""; }, "关系端点已自动保存");
+                ApplyInspectorChange(source.ContainsFocus ? (Control)source : target, delegate { edge.sourceType = s.Type; edge.source = s.Id; edge.targetType = t.Type; edge.target = t.Id; edge.sourceSide = ""; edge.targetSide = ""; }, "关系端点已应用，恢复副本将在后台更新");
             };
             source.SelectedIndexChanged += delegate { if (!_settingUi && _canvas.EditMode) applyEndpoints(); };
             target.SelectedIndexChanged += delegate { if (!_settingUi && _canvas.EditMode) applyEndpoints(); };
             source.LostFocus += delegate { FlushPendingInspectorChange(); }; target.LostFocus += delegate { FlushPendingInspectorChange(); };
-            BindAutoText(label, true, delegate(string value) { edge.label = value.Trim(); }, "关系名称已自动保存");
-            BindAutoCombo(category, delegate { edge.category = _canvas.Document.settings.relationTypes[Math.Max(0, category.SelectedIndex)].id; }, "关系类别已自动保存");
-            BindAutoCombo(line, delegate { edge.lineType = LineTypeAt(line.SelectedIndex); }, "关系线型已自动保存");
+            BindAutoText(label, true, delegate(string value) { edge.label = value.Trim(); }, "关系名称已应用，恢复副本将在后台更新");
+            BindAutoCombo(category, delegate { edge.category = _canvas.Document.settings.relationTypes[Math.Max(0, category.SelectedIndex)].id; }, "关系类别已应用，恢复副本将在后台更新");
+            BindAutoCombo(line, delegate { edge.lineType = LineTypeAt(line.SelectedIndex); }, "关系线型已应用，恢复副本将在后台更新");
         }
+
+        private bool SwapSelectedEdgeDirection()
+        {
+            FinishPendingCanvasWork();
+            if (_canvas.Document == null || _canvas.SelectedType != "edge") return false;
+            GraphEdge edge = _canvas.Document.edges.FirstOrDefault(delegate(GraphEdge item) { return item.id == _canvas.SelectedId; });
+            if (edge == null) return false;
+            string nextSourceKey = GraphSerialization.EndpointKey(edge.targetType, edge.target);
+            string nextTargetKey = GraphSerialization.EndpointKey(edge.sourceType, edge.source);
+            bool duplicate = _canvas.Document.edges.Any(delegate(GraphEdge item)
+            {
+                return item.id != edge.id && GraphSerialization.EndpointKey(item.sourceType, item.source) == nextSourceKey && GraphSerialization.EndpointKey(item.targetType, item.target) == nextTargetKey;
+            });
+            if (duplicate) { _statusText.Text = "反向关系已经存在，未交换方向"; return false; }
+            string beforeJson = GraphSerialization.Serialize(_canvas.Document, false);
+            string sourceType = edge.sourceType, source = edge.source;
+            edge.sourceType = edge.targetType; edge.source = edge.target;
+            edge.targetType = sourceType; edge.target = source;
+            edge.sourceSide = ""; edge.targetSide = "";
+            CommitChange(beforeJson, "关系方向已交换");
+            _canvas.SelectEntity("edge", edge.id);
+            return true;
+        }
+
+        internal bool SwapSelectedEdgeDirectionForTesting() { return SwapSelectedEdgeDirection(); }
 
         private string AutomaticMembershipText(IEnumerable<string> membershipIds)
         {
@@ -1452,6 +1986,7 @@ namespace RelationshipGraphNative
         private ComboBox AddEndpointField(string label, List<EndpointItem> endpoints, string selectedKey, ref int y)
         {
             AddLabel(label, ref y); ComboBox box = new ComboBox(); box.DropDownStyle = ComboBoxStyle.DropDownList; box.Font = Font; box.SetBounds(InspectorLeft, y, InspectorContentWidth(), 34); box.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            box.AccessibleName = label;
             _inspector.Controls.Add(box);
             box.Items.AddRange(endpoints.Cast<object>().ToArray());
             int index = endpoints.FindIndex(delegate(EndpointItem item) { return item.Key == selectedKey; });
@@ -1536,12 +2071,15 @@ namespace RelationshipGraphNative
         private TextBox AddTextField(string label, string value, bool multiline, ref int y)
         {
             AddLabel(label, ref y); TextBox box = new TextBox(); box.Text = value ?? ""; box.Multiline = multiline; box.ScrollBars = multiline ? ScrollBars.Vertical : ScrollBars.None; box.Font = Font;
+            box.AccessibleName = label;
+            box.MaxLength = label == "图名称" ? 80 : label.IndexOf("备注", StringComparison.Ordinal) >= 0 ? 300 : label.IndexOf("类型", StringComparison.Ordinal) >= 0 ? 30 : 40;
             box.AutoSize = false; int height = multiline ? 120 : Math.Max(34, box.Font.Height + 12); box.SetBounds(InspectorLeft, y, InspectorContentWidth(), height); box.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right; _inspector.Controls.Add(box); y += height + 16; return box;
         }
 
         private ComboBox AddComboField(string label, string[] choices, int selected, ref int y)
         {
             AddLabel(label, ref y); ComboBox box = new ComboBox(); box.DropDownStyle = ComboBoxStyle.DropDownList; box.Font = Font; box.Items.AddRange(choices.Cast<object>().ToArray()); if (box.Items.Count > 0) box.SelectedIndex = Math.Max(0, Math.Min(box.Items.Count - 1, selected));
+            box.AccessibleName = label;
             box.SetBounds(InspectorLeft, y, InspectorContentWidth(), 34); box.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right; _inspector.Controls.Add(box); y += 48; return box;
         }
 
@@ -1558,6 +2096,7 @@ namespace RelationshipGraphNative
                 new ColorCategoryChoice("commercial", "橙色", Color.FromArgb(232, 150, 62))
             };
             ComboBox box = new ComboBox(); box.DropDownStyle = ComboBoxStyle.DropDownList; box.Font = Font; box.DrawMode = DrawMode.OwnerDrawFixed; box.ItemHeight = 30; box.Items.AddRange(choices.Cast<object>().ToArray());
+            box.AccessibleName = "颜色分类";
             int selected = Array.FindIndex(choices, delegate(ColorCategoryChoice item) { return item.Kind == selectedKind; }); box.SelectedIndex = selected < 0 ? 0 : selected;
             box.DrawItem += delegate(object sender, DrawItemEventArgs e)
             {
@@ -1582,21 +2121,35 @@ namespace RelationshipGraphNative
         private void UpdateTitle() { if (_canvas.Document != null) Text = _canvas.Document.meta.title + (_isDirty ? " *" : "") + " — 关系图编辑器" + (String.IsNullOrEmpty(_currentFile) ? "" : "  [" + Path.GetFileName(_currentFile) + "]"); }
         internal bool DirtyForTesting { get { return _isDirty; } }
         internal string AutosavePathForTesting { get { return _autosavePath; } }
-        private static string LineTypeAt(int index) { return index == 1 ? "straight" : index == 2 ? "polyline" : "curve"; }
+        private static string LineTypeAt(int index) { return index == 0 ? "auto" : index == 2 ? "straight" : index == 3 ? "polyline" : "curve"; }
         private static int ShapeIndex(string shape) { return shape == "terminator" ? 1 : shape == "decision" ? 2 : shape == "data" ? 3 : shape == "document" ? 4 : 0; }
         private static string ShapeAt(int index) { return index == 1 ? "terminator" : index == 2 ? "decision" : index == 3 ? "data" : index == 4 ? "document" : "process"; }
-        private static int LineTypeIndex(string lineType) { return lineType == "straight" ? 1 : lineType == "polyline" ? 2 : 0; }
+        private static int LineTypeIndex(string lineType) { return lineType == "auto" ? 0 : lineType == "straight" ? 2 : lineType == "polyline" ? 3 : 1; }
 
         private void MainFormKeyDown(object sender, KeyEventArgs e)
         {
+            if (_activeWorkId != 0 && e.KeyCode == Keys.Escape)
+            {
+                RequestBackgroundCancellation();
+                e.Handled = true; e.SuppressKeyPress = true; return;
+            }
             bool textInputFocused = TextInputHasFocus();
             if (e.Control && e.KeyCode == Keys.C && !textInputFocused) { CopySelected(true); e.Handled = true; e.SuppressKeyPress = true; }
             else if (e.Control && e.KeyCode == Keys.V && !textInputFocused) { PasteSelected(true); e.Handled = true; e.SuppressKeyPress = true; }
             else if (ShouldDeleteSelection(e.KeyCode, textInputFocused)) { DeleteSelected(); e.Handled = true; e.SuppressKeyPress = true; }
-            else if (e.KeyCode == Keys.F2) { _inspector.Focus(); e.Handled = true; }
+            else if (e.KeyCode == Keys.F2 && !textInputFocused) { _canvas.BeginSelectedLabelEdit(); e.Handled = true; e.SuppressKeyPress = true; }
             else if (e.KeyCode == Keys.Escape) { _canvas.CancelActiveGesture(); _canvas.ClearSelection(); }
             else if (e.Control && e.KeyCode == Keys.F) { FocusSearch(); e.Handled = true; e.SuppressKeyPress = true; }
             else if (e.Control && e.KeyCode == Keys.H) { ShowReplaceDialog(); e.Handled = true; e.SuppressKeyPress = true; }
+        }
+
+        protected override bool ProcessCmdKey(ref Message message, Keys keyData)
+        {
+            if (_activeWorkId != 0 && (keyData & Keys.KeyCode) == Keys.Escape)
+            {
+                RequestBackgroundCancellation(); return true;
+            }
+            return base.ProcessCmdKey(ref message, keyData);
         }
 
         private bool TextInputHasFocus()
@@ -1623,10 +2176,32 @@ namespace RelationshipGraphNative
 
         private void ShowHelp()
         {
-            MessageBox.Show(this, "关系图打开后始终可以直接编辑。\n\n操作方法：\n· 画布不受默认尺寸边界限制，可向任意方向平移和摆放内容\n· 适合窗口会自动显示当前全部内容\n· Ctrl+F 查找节点、分组和关系文字；重复回车查找下一个\n· Ctrl+H 打开查找和替换，可替换当前所选或整张图，并支持撤销\n· 有选中节点或分组时点击＋分组：自动创建包住选中内容的外层分组\n· 没有选中节点或分组时点击＋节点或＋分组：在当前屏幕中心创建\n· 单击对象：选择并显示上下游关系\n· 节点可同时属于多个分组，分组也可位于其他分组内形成多层结构\n· 节点和分组的所属关系按当前位置自动匹配，右侧只读显示层级路径\n· 移动外层分组时，内部子分组和节点会一起移动\n· 空白处按住左键拖动：同时框选节点和完整位于框内的分组\n· 框选多个对象时只显示选中项，不自动高亮邻居\n· Ctrl+C / Ctrl+V：复制、粘贴选中内容到当前屏幕中心\n· 撤销或重做只恢复内容，不改变当前缩放比例和画布位置\n· 拖动节点或分组时，可互相对齐并吸附等间距，画布会显示参考提示\n· 按住 Ctrl 拖动节点或分组：关闭所有吸附，自由摆放\n· 未选节点或分组拖向目标：按对象最终相对位置从上、右、下、左自动连线\n· 节点和分组均不显示连线圆圈；选中后拖动内部可移动\n· 选中分组后，鼠标移到边缘或四角会显示缩放光标，拖动即可调整大小\n· 双击线条：直接修改或清空关系名称\n· 双击节点左上角类型：直接编辑节点类型\n· 双击节点中央名称：直接编辑节点名称\n· 双击分组左上角标题：直接编辑分组名称\n· Ctrl/Shift 单击可多选\n· 右键单击清除当前全部选择\n· 按住右键拖动：十字光标平移整个画布\n· 删除键直接删除，不弹出二次确认\n· 鼠标滚轮缩放\n\n导入飞书画板：\n· 文件 → 导出 → 飞书画板（draw.io，可编辑）\n· 在飞书桌面端打开画板，选择导入该文件\n· 导入后节点、分组和连线均为独立可编辑对象", "操作说明", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            string help = String.Join("\n", new[]
+            {
+                "关系图打开后始终可以直接编辑。", "", "高频操作：",
+                "· Ctrl+Shift+L：自动分层排版，并完成端口错开、连线避障和标签避让",
+                "· 右下角小地图：点击或拖动快速导航；可在“视图”菜单中关闭",
+                "· Tab / Shift+Tab：切换对象；方向键：移动；Shift+方向键：快速移动",
+                "· Alt+方向键：选择相邻对象；Ctrl+方向键：平移视野",
+                "· Enter 或 F2：编辑当前对象名称",
+                "· Ctrl+F：查找并自动把目标移入视野；Ctrl+H：查找和替换",
+                "· Ctrl+O / Ctrl+S / Ctrl+Shift+S：导入、保存、另存为",
+                "", "画布操作：",
+                "· 双击空白处新增节点；有选中内容时点击＋分组会自动包住选中内容",
+                "· 先选中再拖动可移动对象；Ctrl 拖动关闭吸附并自由摆放",
+                "· 拖动未选中的节点或分组到目标可创建关系",
+                "· Ctrl/Shift 单击多选；空白处左键拖动框选；Delete 删除；Ctrl+Z 撤销",
+                "· 选中分组后拖动边缘或四角调整大小；右键拖动画布；滚轮缩放",
+                "· 右侧属性即时应用；恢复副本在后台防抖保存，JSON 文件仍以 Ctrl+S 保存",
+                "", "Draw.io 与导出：",
+                "· 多页 Draw.io 会先显示页面列表，由你选择要导入的页面",
+                "· 文件 → 导出支持 Draw.io、只读 HTML、SVG、PNG 和 PDF",
+                "· 大文件导入和导出在后台执行，状态栏显示进度并提供取消入口"
+            });
+            MessageBox.Show(this, help, "操作说明", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
-        private void ShowAbout() { MessageBox.Show(this, "关系图编辑器 4.5.1\n\n纯原生 Windows 桌面程序\nC# / WinForms / GDI+\n\n不使用浏览器、不启动网页服务、不以 HTML 作为运行底层。\n\n有任何问题或建议，请联系WZC", "关于", MessageBoxButtons.OK, MessageBoxIcon.Information); }
+        private void ShowAbout() { MessageBox.Show(this, "关系图编辑器 5.0.0\n\n纯原生 Windows 桌面程序\nC# / WinForms / GDI+\n\n不使用浏览器、不启动网页服务、不以 HTML 作为运行底层。\n\n有任何问题或建议，请联系WZC", "关于", MessageBoxButtons.OK, MessageBoxIcon.Information); }
         private void ShowError(string title, Exception error) { MessageBox.Show(this, error.Message, title, MessageBoxButtons.OK, MessageBoxIcon.Error); }
     }
 
@@ -1639,6 +2214,45 @@ namespace RelationshipGraphNative
         public override string ToString() { return Text; }
     }
 
+    internal sealed class DrawioPageDialog : Form
+    {
+        private readonly ListBox _pages = new ListBox();
+        private readonly IList<DrawioPageInfo> _items;
+
+        public DrawioPageDialog(IList<DrawioPageInfo> pages, bool darkTheme)
+        {
+            _items = pages ?? new List<DrawioPageInfo>();
+            Text = "选择 Draw.io 页面"; Icon = NativeAppIcon.Create(); ShowIcon = true;
+            AutoScaleMode = AutoScaleMode.Dpi; AutoScaleDimensions = new SizeF(96f, 96f);
+            StartPosition = FormStartPosition.CenterParent; FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = false; MinimizeBox = false; ShowInTaskbar = false; ClientSize = new Size(520, 410);
+            Font = new Font("Microsoft YaHei UI", 9.5f);
+            Label intro = new Label { Text = "该文件包含多个页面。请选择要导入的页面：", AutoSize = false, AccessibleName = "页面选择说明" };
+            intro.SetBounds(22, 20, 476, 28); Controls.Add(intro);
+            _pages.SetBounds(22, 54, 476, 286); _pages.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom;
+            _pages.AccessibleName = "Draw.io 页面列表";
+            for (int index = 0; index < _items.Count; index++) _pages.Items.Add((index + 1) + ". " + _items[index].DisplayName);
+            if (_pages.Items.Count > 0) _pages.SelectedIndex = 0;
+            _pages.DoubleClick += delegate { if (_pages.SelectedIndex >= 0) { DialogResult = DialogResult.OK; Close(); } };
+            Controls.Add(_pages);
+            Button cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel }; cancel.SetBounds(322, 354, 82, 36); Controls.Add(cancel);
+            Button import = new Button { Text = "导入所选页", DialogResult = DialogResult.OK, BackColor = Color.FromArgb(43, 108, 245), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
+            import.FlatAppearance.BorderSize = 0; import.SetBounds(414, 354, 84, 36); import.Enabled = _pages.Items.Count > 0; Controls.Add(import);
+            AcceptButton = import; CancelButton = cancel;
+            NativeTheme.ApplyControlTree(this, darkTheme);
+            HandleCreated += delegate { NativeTheme.ApplyWindowDarkMode(this, darkTheme); };
+        }
+
+        public int SelectedPageIndex
+        {
+            get
+            {
+                int selected = _pages.SelectedIndex;
+                return selected >= 0 && selected < _items.Count ? _items[selected].Index : 0;
+            }
+        }
+    }
+
     internal sealed class RelationDialog : Form
     {
         private readonly ComboBox _source = new ComboBox(); private readonly ComboBox _target = new ComboBox(); private readonly TextBox _label = new TextBox(); private readonly ComboBox _category = new ComboBox(); private readonly ComboBox _line = new ComboBox(); private readonly GraphDocument _graph;
@@ -1649,9 +2263,12 @@ namespace RelationshipGraphNative
             List<EndpointItem> endpoints = new List<EndpointItem>(); endpoints.AddRange(graph.nodes.Select(delegate(GraphNode item) { return new EndpointItem { Type = "node", Id = item.id, Label = "节点 · " + item.label }; })); endpoints.AddRange(graph.groups.Select(delegate(GraphGroup item) { return new EndpointItem { Type = "group", Id = item.id, Label = "分组 · " + item.label }; }));
             AddLabel("起点", 22); SetupCombo(_source, 48); _source.DataSource = new List<EndpointItem>(endpoints);
             AddLabel("终点", 88); SetupCombo(_target, 114); _target.DataSource = new List<EndpointItem>(endpoints); if (_target.Items.Count > 1) _target.SelectedIndex = 1;
+            _source.AccessibleName = "关系起点"; _target.AccessibleName = "关系终点";
             AddLabel("关系名称（可留空）", 154); _label.SetBounds(22, 180, 386, 27); Controls.Add(_label);
+            _label.MaxLength = 40; _label.AccessibleName = "关系名称";
             AddLabel("关系类别（线色跟随起点）", 220); SetupCombo(_category, 246); _category.Items.AddRange(graph.settings.relationTypes.Select(delegate(RelationType item) { return (object)item.label; }).ToArray()); _category.SelectedIndex = 0;
-            AddLabel("线型", 286); _line.DropDownStyle = ComboBoxStyle.DropDownList; _line.Items.AddRange(new object[] { "曲线", "直线", "折线" }); _line.SelectedIndex = currentLineType == "straight" ? 1 : currentLineType == "polyline" ? 2 : 0; _line.SetBounds(74, 280, 105, 28); Controls.Add(_line);
+            AddLabel("线型", 286); _line.DropDownStyle = ComboBoxStyle.DropDownList; _line.Items.AddRange(new object[] { "自动避障", "曲线", "直线", "折线" }); _line.SelectedIndex = currentLineType == "auto" ? 0 : currentLineType == "straight" ? 2 : currentLineType == "polyline" ? 3 : 1; _line.SetBounds(74, 280, 105, 28); Controls.Add(_line);
+            _category.AccessibleName = "关系类别"; _line.AccessibleName = "关系线型";
             Button cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel }; cancel.SetBounds(233, 278, 82, 34); Controls.Add(cancel);
             Button ok = new Button { Text = "创建", DialogResult = DialogResult.OK, BackColor = Color.FromArgb(43, 108, 245), ForeColor = Color.White, FlatStyle = FlatStyle.Flat }; ok.FlatAppearance.BorderSize = 0; ok.SetBounds(326, 278, 82, 34); ok.Click += ValidateBeforeClose; Controls.Add(ok); AcceptButton = ok; CancelButton = cancel;
             NativeTheme.ApplyControlTree(this, darkTheme);
@@ -1664,7 +2281,7 @@ namespace RelationshipGraphNative
         public GraphEdge CreateEdge(string id)
         {
             EndpointItem source = (EndpointItem)_source.SelectedItem, target = (EndpointItem)_target.SelectedItem;
-            return new GraphEdge { id = id, sourceType = source.Type, source = source.Id, targetType = target.Type, target = target.Id, label = _label.Text.Trim(), category = _graph.settings.relationTypes[Math.Max(0, _category.SelectedIndex)].id, lineType = _line.SelectedIndex == 1 ? "straight" : _line.SelectedIndex == 2 ? "polyline" : "curve", sourceSide = "", targetSide = "" };
+            return new GraphEdge { id = id, sourceType = source.Type, source = source.Id, targetType = target.Type, target = target.Id, label = _label.Text.Trim(), category = _graph.settings.relationTypes[Math.Max(0, _category.SelectedIndex)].id, lineType = _line.SelectedIndex == 0 ? "auto" : _line.SelectedIndex == 2 ? "straight" : _line.SelectedIndex == 3 ? "polyline" : "curve", sourceSide = "", targetSide = "" };
         }
     }
 }

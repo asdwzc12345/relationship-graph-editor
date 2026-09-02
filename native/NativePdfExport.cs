@@ -33,16 +33,22 @@ namespace RelationshipGraphNative
             Dictionary<string, GraphNode> nodes = graph.nodes.ToDictionary(delegate(GraphNode item) { return item.id; }, StringComparer.Ordinal);
             Dictionary<string, GraphGroup> groups = graph.groups.ToDictionary(delegate(GraphGroup item) { return item.id; }, StringComparer.Ordinal);
             RectangleF bounds = CalculateBounds(graph, nodes, groups);
+            GraphLayoutResult routing = GraphLayout.CalculateRoutes(graph, GraphLayoutOptions.ForDocument(graph));
+            if (routing != null && routing.ContentBounds.Width > 0 && routing.ContentBounds.Height > 0)
+            {
+                RectangleF routedBounds = routing.ContentBounds; routedBounds.Inflate(36f, 36f);
+                bounds = RectangleF.Union(bounds, routedBounds);
+            }
             ValidateBounds(bounds);
             double pageScale = Math.Min(1d, Math.Min(14400d / Math.Max(1d, bounds.Width), 14400d / Math.Max(1d, bounds.Height)));
             RequireFinite(pageScale, "PDF 页面缩放");
             if (pageScale <= 0) throw new InvalidDataException("PDF 页面缩放必须大于 0。");
             double pageWidth = Math.Max(1d, (double)bounds.Width * pageScale), pageHeight = Math.Max(1d, (double)bounds.Height * pageScale);
             RequireFinite(pageWidth, "PDF 页面宽度"); RequireFinite(pageHeight, "PDF 页面高度");
-            WritePdfDocument(destination, graph, nodes, groups, bounds, pageScale, pageWidth, pageHeight);
+            WritePdfDocument(destination, graph, nodes, groups, routing, bounds, pageScale, pageWidth, pageHeight);
         }
 
-        private static void WriteContent(TextWriter content, GraphDocument graph, Dictionary<string, GraphNode> nodes, Dictionary<string, GraphGroup> groups, RectangleF bounds, double pageScale)
+        private static void WriteContent(TextWriter content, GraphDocument graph, Dictionary<string, GraphNode> nodes, Dictionary<string, GraphGroup> groups, GraphLayoutResult routing, RectangleF bounds, double pageScale)
         {
             double translateX = -(double)bounds.X * pageScale;
             double translateY = ((double)bounds.Y + bounds.Height) * pageScale;
@@ -75,7 +81,9 @@ namespace RelationshipGraphNative
                 string targetSide = String.IsNullOrEmpty(edge.targetSide) ? ConnectionSide(targetRect, sourceRect) : edge.targetSide;
                 PointF sourcePoint = Port(sourceRect, sourceSide), targetPoint = Port(targetRect, targetSide);
                 string color = SourceAccentColor(edge, nodes);
-                using (GraphicsPath path = EdgePath(edge.lineType, sourceSide, targetSide, sourcePoint, targetPoint))
+                GraphEdgeLayout routedEdge = null;
+                bool hasRoute = edge.lineType == "auto" && routing != null && routing.TryGetEdge(edge.id, out routedEdge) && routedEdge != null && routedEdge.Points.Count >= 2;
+                using (GraphicsPath path = hasRoute ? RoutedPath(routedEdge.Points) : EdgePath(edge.lineType, sourceSide, targetSide, sourcePoint, targetPoint))
                 {
                     SetStroke(content, color); content.Write("2 w 1 J 1 j\n"); AppendPath(content, path); content.Write("S\n");
                     using (GraphicsPath arrow = ArrowPath(path, 8f))
@@ -86,9 +94,9 @@ namespace RelationshipGraphNative
 
                 if (!String.IsNullOrWhiteSpace(edge.label))
                 {
-                    PointF midpoint = EdgePathMidpoint(edge.lineType, sourceSide, targetSide, sourcePoint, targetPoint);
+                    PointF midpoint = hasRoute ? routedEdge.LabelPoint : EdgePathMidpoint(edge.lineType, sourceSide, targetSide, sourcePoint, targetPoint);
                     float width = Math.Max(44f, edge.label.Length * 14f + 14f);
-                    RectangleF box = new RectangleF(midpoint.X - width / 2f, midpoint.Y - 13f, width, 25f);
+                    RectangleF box = hasRoute && !routedEdge.LabelBounds.IsEmpty ? routedEdge.LabelBounds : new RectangleF(midpoint.X - width / 2f, midpoint.Y - 13f, width, 26f);
                     using (GraphicsPath shape = RoundRect(box, 7f))
                     {
                         SetFill(content, "#ffffff"); AppendPath(content, shape); content.Write("f\n");
@@ -104,16 +112,18 @@ namespace RelationshipGraphNative
             foreach (GraphNode node in graph.nodes)
             {
                 RectangleF rect = new RectangleF(node.x, node.y, node.w, node.h);
-                using (GraphicsPath shape = RoundRect(rect, 9f))
+                using (GraphicsPath shape = NodeShapePath(node))
                 {
                     SetFill(content, NodeColor(node.kind)); AppendPath(content, shape); content.Write("f\n");
                     SetStroke(content, "#697785"); content.Write("1.4 w\n"); AppendPath(content, shape); content.Write("S\n");
                 }
-                using (GraphicsPath type = TextPath(node.type ?? "节点类型", new RectangleF(node.x + 9, node.y + 3, Math.Max(1, node.w - 18), 15), 7.8f, FontStyle.Regular, StringAlignment.Near, StringAlignment.Center))
+                bool flowchart = graph.meta != null && graph.meta.diagramType == "flowchart";
+                if (!flowchart) using (GraphicsPath type = TextPath(node.type ?? "节点类型", new RectangleF(node.x + 9, node.y + 3, Math.Max(1, node.w - 18), 15), 7.8f, FontStyle.Regular, StringAlignment.Near, StringAlignment.Center))
                 {
                     SetFill(content, "#425064"); AppendPath(content, type); content.Write("f\n");
                 }
-                using (GraphicsPath label = TextPath(node.label ?? "", new RectangleF(node.x + 6, node.y + 17, Math.Max(1, node.w - 12), Math.Max(1, node.h - 18)), 9.2f, FontStyle.Bold, StringAlignment.Center, StringAlignment.Center))
+                RectangleF labelBounds = flowchart ? new RectangleF(node.x + 8, node.y + 6, Math.Max(1, node.w - 16), Math.Max(1, node.h - 12)) : new RectangleF(node.x + 6, node.y + 17, Math.Max(1, node.w - 12), Math.Max(1, node.h - 18));
+                using (GraphicsPath label = TextPath(node.label ?? "", labelBounds, 9.2f, FontStyle.Bold, StringAlignment.Center, StringAlignment.Center))
                 {
                     SetFill(content, "#17202b"); AppendPath(content, label); content.Write("f\n");
                 }
@@ -121,7 +131,7 @@ namespace RelationshipGraphNative
             content.Write("Q\n");
         }
 
-        private static void WritePdfDocument(Stream destination, GraphDocument graph, Dictionary<string, GraphNode> nodes, Dictionary<string, GraphGroup> groups, RectangleF bounds, double pageScale, double pageWidth, double pageHeight)
+        private static void WritePdfDocument(Stream destination, GraphDocument graph, Dictionary<string, GraphNode> nodes, Dictionary<string, GraphGroup> groups, GraphLayoutResult routing, RectangleF bounds, double pageScale, double pageWidth, double pageHeight)
         {
             CountingWriteStream output = new CountingWriteStream(destination);
             long[] offsets = new long[6];
@@ -137,7 +147,7 @@ namespace RelationshipGraphNative
             // An indirect length keeps the production path streaming without seeking or back-patching.
             WriteAscii(output, "4 0 obj\n<< /Length 5 0 R /Filter /FlateDecode >>\nstream\n");
             long contentStart = output.BytesWritten;
-            WriteCompressedContent(output, delegate(TextWriter writer) { WriteContent(writer, graph, nodes, groups, bounds, pageScale); });
+            WriteCompressedContent(output, delegate(TextWriter writer) { WriteContent(writer, graph, nodes, groups, routing, bounds, pageScale); });
             long contentLength = output.BytesWritten - contentStart;
             WriteAscii(output, "\nendstream\nendobj\n");
 
@@ -215,6 +225,47 @@ namespace RelationshipGraphNative
             return path;
         }
 
+        private static GraphicsPath RoutedPath(IList<PointF> points)
+        {
+            GraphicsPath path = new GraphicsPath();
+            try
+            {
+                List<PointF> clean = new List<PointF>();
+                if (points != null) foreach (PointF point in points)
+                {
+                    if (clean.Count == 0 || Distance(clean[clean.Count - 1], point) > .01f) clean.Add(point);
+                }
+                if (clean.Count < 2) throw new InvalidDataException("自动路由缺少有效线路点。");
+                path.AddLines(clean.ToArray()); return path;
+            }
+            catch { path.Dispose(); throw; }
+        }
+
+        private static GraphicsPath NodeShapePath(GraphNode node)
+        {
+            RectangleF rect = new RectangleF(node.x, node.y, node.w, node.h);
+            string shape = GraphSerialization.NormalizeNodeShape(node.shape);
+            if (shape == "terminator") return RoundRect(rect, rect.Height / 2f);
+            GraphicsPath path = new GraphicsPath();
+            try
+            {
+                if (shape == "decision") path.AddPolygon(new[] { new PointF(rect.Left + rect.Width / 2f, rect.Top), new PointF(rect.Right, rect.Top + rect.Height / 2f), new PointF(rect.Left + rect.Width / 2f, rect.Bottom), new PointF(rect.Left, rect.Top + rect.Height / 2f) });
+                else if (shape == "data")
+                {
+                    float inset = Math.Min(18f, rect.Width / 6f);
+                    path.AddPolygon(new[] { new PointF(rect.Left + inset, rect.Top), new PointF(rect.Right, rect.Top), new PointF(rect.Right - inset, rect.Bottom), new PointF(rect.Left, rect.Bottom) });
+                }
+                else if (shape == "document")
+                {
+                    path.AddLines(new[] { new PointF(rect.Left, rect.Top), new PointF(rect.Right, rect.Top), new PointF(rect.Right, rect.Bottom - 8), new PointF(rect.Right - rect.Width * .25f, rect.Bottom), new PointF(rect.Left + rect.Width * .25f, rect.Bottom - 8), new PointF(rect.Left, rect.Bottom), new PointF(rect.Left, rect.Top) });
+                    path.CloseFigure();
+                }
+                else { path.Dispose(); return RoundRect(rect, 9f); }
+                return path;
+            }
+            catch { path.Dispose(); throw; }
+        }
+
         private static GraphicsPath RoundRect(RectangleF rect, float radius)
         {
             GraphicsPath path = new GraphicsPath();
@@ -230,7 +281,7 @@ namespace RelationshipGraphNative
         {
             GraphicsPath path = new GraphicsPath();
             if (lineType == "straight") path.AddLine(source, target);
-            else if (lineType == "polyline")
+            else if (lineType == "polyline" || lineType == "auto")
             {
                 if (sourceSide == "left" || sourceSide == "right")
                 {

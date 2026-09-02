@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -11,8 +12,8 @@ using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyCompany("Relationship Studio")]
 [assembly: System.Reflection.AssemblyProduct("关系图编辑器")]
 [assembly: System.Reflection.AssemblyCopyright("Copyright © 2026")]
-[assembly: System.Reflection.AssemblyVersion("4.5.1.0")]
-[assembly: System.Reflection.AssemblyFileVersion("4.5.1.0")]
+[assembly: System.Reflection.AssemblyVersion("5.0.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("5.0.0.0")]
 
 namespace RelationshipGraphNative
 {
@@ -98,6 +99,13 @@ namespace RelationshipGraphNative
                 NativePersistence.WriteAllTextAtomic(atomicPath, "first", new UTF8Encoding(false), true);
                 NativePersistence.WriteAllTextAtomic(atomicPath, "second", new UTF8Encoding(false), true);
                 Require(File.ReadAllText(atomicPath, Encoding.UTF8) == "second" && File.ReadAllText(atomicPath + ".bak", Encoding.UTF8) == "first", "原子保存或备份失败");
+                GraphDocument drawioTextJson = GraphSerialization.CreateBlank("JSON 格式识别测试");
+                drawioTextJson.nodes.Add(new GraphNode { id = "json_text", label = "包含 <mxfile 文本", type = "节点类型", kind = "system", shape = "process", group = "", x = 10, y = 10, w = 150, h = 54, note = "<mxGraphModel 也只是普通备注" });
+                drawioTextJson = GraphSerialization.Normalize(drawioTextJson);
+                string drawioTextJsonPath = Path.Combine(tempFolder, "drawio-text.txt");
+                NativeExport.SaveJson(drawioTextJson, drawioTextJsonPath);
+                GraphDocument importedDrawioTextJson = GraphSerialization.LoadFile(drawioTextJsonPath);
+                Require(importedDrawioTextJson.nodes.Count == 1 && importedDrawioTextJson.nodes[0].label == "包含 <mxfile 文本", "JSON 文本被误判为 Draw.io XML");
                 bool interruptedWriteFailed = false;
                 try
                 {
@@ -110,12 +118,166 @@ namespace RelationshipGraphNative
                 catch (IOException) { interruptedWriteFailed = true; }
                 Require(interruptedWriteFailed && File.ReadAllText(atomicPath, Encoding.UTF8) == "second", "写入中断破坏了原文件");
                 Require(Directory.GetFiles(tempFolder, ".atomic-save.json.*.tmp").Length == 0, "原子保存残留临时文件");
+                bool publishCancelled = false;
+                try
+                {
+                    NativePersistence.WriteStreamAtomic(atomicPath, false, delegate(Stream stream)
+                    {
+                        byte[] replacement = Encoding.UTF8.GetBytes("cancelled replacement"); stream.Write(replacement, 0, replacement.Length);
+                    }, delegate { throw new OperationCanceledException("simulated pre-publish cancellation"); });
+                }
+                catch (OperationCanceledException) { publishCancelled = true; }
+                Require(publishCancelled && File.ReadAllText(atomicPath, Encoding.UTF8) == "second", "正式发布前取消仍覆盖了原文件");
+
+                Exception concurrentSerializationError = null;
+                List<Thread> serializationThreads = new List<Thread>();
+                for (int threadIndex = 0; threadIndex < 4; threadIndex++)
+                {
+                    Thread thread = new Thread(delegate()
+                    {
+                        try
+                        {
+                            for (int iteration = 0; iteration < 60; iteration++)
+                            {
+                                string serialized = GraphSerialization.Serialize(graph, false);
+                                GraphDocument parsed = GraphSerialization.Deserialize(serialized);
+                                if (parsed.nodes.Count != graph.nodes.Count || parsed.edges.Count != graph.edges.Count) throw new InvalidDataException("并发序列化往返数量错误。");
+                            }
+                        }
+                        catch (Exception error) { concurrentSerializationError = error; }
+                    });
+                    thread.IsBackground = true; serializationThreads.Add(thread); thread.Start();
+                }
+                foreach (Thread thread in serializationThreads) Require(thread.Join(TimeSpan.FromSeconds(5)), "并发序列化测试超时");
+                Require(concurrentSerializationError == null, "并发序列化失败：" + (concurrentSerializationError == null ? "" : concurrentSerializationError.Message));
 
                 AutosaveStore autosaveStore = new AutosaveStore(Path.Combine(tempFolder, "recovery", "autosave.json"));
                 Require(autosaveStore.Save(GraphSerialization.Serialize(graph, false)).Length == 0, "自动恢复主文件保存失败");
                 Require(autosaveStore.GetRecoveryCandidates().Count >= 2, "自动恢复没有生成主文件和历史版本");
                 autosaveStore.ClearAll();
                 Require(autosaveStore.GetRecoveryCandidates().Count == 0 && !Directory.Exists(autosaveStore.HistoryDirectory), "放弃修改后自动恢复数据未清理干净");
+
+                string recentInputFolder = Path.Combine(tempFolder, "recent-input");
+                Directory.CreateDirectory(recentInputFolder);
+                List<string> recentInputFiles = new List<string>();
+                for (int recentIndex = 0; recentIndex < 12; recentIndex++)
+                {
+                    string recentInputPath = Path.Combine(recentInputFolder, "recent-" + recentIndex + ".json");
+                    File.WriteAllText(recentInputPath, "{}", new UTF8Encoding(false));
+                    recentInputFiles.Add(Path.GetFullPath(recentInputPath));
+                }
+                RecentFileStore recentFileStore = new RecentFileStore(Path.Combine(tempFolder, "recent-files.txt"));
+                foreach (string recentInputPath in recentInputFiles) Require(recentFileStore.Add(recentInputPath), "最近文件写入失败");
+                IList<string> recentFiles = recentFileStore.GetFiles();
+                Require(recentFiles.Count == RecentFileStore.MaximumFiles && recentFiles[0] == recentInputFiles[11] && recentFiles[9] == recentInputFiles[2], "最近文件数量上限或顺序错误");
+                Require(recentFileStore.Add(recentInputFiles[5]), "最近文件重复项更新失败");
+                recentFiles = recentFileStore.GetFiles();
+                Require(recentFiles.Count == RecentFileStore.MaximumFiles && recentFiles[0] == recentInputFiles[5] && recentFiles.Distinct(StringComparer.OrdinalIgnoreCase).Count() == recentFiles.Count, "最近文件没有去重或置顶");
+                File.Delete(recentInputFiles[5]);
+                recentFiles = recentFileStore.GetFiles();
+                Require(recentFiles.Count == RecentFileStore.MaximumFiles - 1 && !recentFiles.Contains(recentInputFiles[5], StringComparer.OrdinalIgnoreCase), "最近文件没有过滤已不存在的文件");
+                Require(!recentFileStore.Add(Path.Combine(recentInputFolder, "missing.json")), "最近文件错误接受了不存在的文件");
+
+                GraphDocument saveAsGraph = GraphSerialization.CreateBlank("另存为原始版本");
+                string firstSaveAsPath = Path.Combine(tempFolder, "save-as-first.json"), secondSaveAsPath = Path.Combine(tempFolder, "save-as-second.json");
+                using (MainForm saveAsWindow = new MainForm(saveAsGraph, false, Path.Combine(tempFolder, "save-as-recent.txt")))
+                {
+                    Require(saveAsWindow.SaveJsonToFileForTesting(firstSaveAsPath), "首次保存 JSON 失败");
+                    saveAsWindow.CanvasForTesting.Document.meta.title = "另存为新版本";
+                    Require(saveAsWindow.SaveJsonToFileForTesting(secondSaveAsPath), "另存为新路径失败");
+                    Require(String.Equals(saveAsWindow.CurrentFileForTesting, secondSaveAsPath, StringComparison.OrdinalIgnoreCase), "另存为后当前文件路径未切换");
+                }
+                Require(GraphSerialization.LoadFile(firstSaveAsPath).meta.title == "另存为原始版本" && GraphSerialization.LoadFile(secondSaveAsPath).meta.title == "另存为新版本", "另存为错误覆盖了原文件或未写入新文件");
+
+                using (BackgroundWorkQueue backgroundQueue = new BackgroundWorkQueue("RelationshipGraph.SelfTest"))
+                using (ManualResetEvent progressSeen = new ManualResetEvent(false))
+                using (ManualResetEvent firstCompleted = new ManualResetEvent(false))
+                using (ManualResetEvent cancelStarted = new ManualResetEvent(false))
+                using (ManualResetEvent cancelCompleted = new ManualResetEvent(false))
+                {
+                    BackgroundWorkProgressEventArgs reportedProgress = null;
+                    BackgroundWorkCompletedEventArgs firstResult = null;
+                    BackgroundWorkCompletedEventArgs cancelResult = null;
+                    backgroundQueue.ProgressChanged += delegate(object sender, BackgroundWorkProgressEventArgs e)
+                    {
+                        if (e.Name != "progress-test") return;
+                        reportedProgress = e;
+                        progressSeen.Set();
+                    };
+                    backgroundQueue.WorkCompleted += delegate(object sender, BackgroundWorkCompletedEventArgs e)
+                    {
+                        if (e.Name == "progress-test") { firstResult = e; firstCompleted.Set(); }
+                        else if (e.Name == "cancel-test") { cancelResult = e; cancelCompleted.Set(); }
+                    };
+
+                    long progressWorkId = backgroundQueue.Enqueue("progress-test", delegate(BackgroundWorkContext context)
+                    {
+                        context.ReportProgress(42, "self-test progress");
+                    });
+                    Require(progressSeen.WaitOne(TimeSpan.FromSeconds(2)), "后台任务没有报告进度");
+                    Require(firstCompleted.WaitOne(TimeSpan.FromSeconds(2)), "后台任务没有报告完成");
+                    Require(reportedProgress != null && reportedProgress.WorkId == progressWorkId && reportedProgress.Percentage == 42 && reportedProgress.Message == "self-test progress", "后台任务进度内容错误");
+                    Require(firstResult != null && firstResult.WorkId == progressWorkId && firstResult.Succeeded, "后台任务完成状态错误");
+
+                    long cancelWorkId = backgroundQueue.Enqueue("cancel-test", delegate(BackgroundWorkContext context)
+                    {
+                        cancelStarted.Set();
+                        while (true)
+                        {
+                            context.ThrowIfCancellationRequested();
+                            Thread.Sleep(5);
+                        }
+                    });
+                    Require(cancelStarted.WaitOne(TimeSpan.FromSeconds(2)), "待取消后台任务没有启动");
+                    Require(backgroundQueue.Cancel(cancelWorkId), "后台任务取消请求失败");
+                    Require(cancelCompleted.WaitOne(TimeSpan.FromSeconds(2)), "后台任务取消没有完成");
+                    Require(cancelResult != null && cancelResult.WorkId == cancelWorkId && cancelResult.Cancelled && cancelResult.Error == null, "后台任务取消状态错误");
+                    Require(backgroundQueue.WaitForIdle(TimeSpan.FromSeconds(2)), "后台任务队列未及时空闲");
+                }
+
+                List<string> savedSnapshots = new List<string>();
+                object savedSnapshotsSync = new object();
+                using (DebouncedSaveQueue<string> saveQueue = new DebouncedSaveQueue<string>(TimeSpan.FromMilliseconds(100), delegate(string snapshot, BackgroundWorkContext context)
+                {
+                    context.ThrowIfCancellationRequested();
+                    lock (savedSnapshotsSync) savedSnapshots.Add(snapshot);
+                }))
+                {
+                    saveQueue.QueueSave("snapshot-1");
+                    saveQueue.QueueSave("snapshot-2");
+                    saveQueue.QueueSave("snapshot-3");
+                    Require(saveQueue.Flush(TimeSpan.FromSeconds(2)), "防抖保存 Flush 超时");
+                }
+                lock (savedSnapshotsSync)
+                    Require(savedSnapshots.Count == 1 && savedSnapshots[0] == "snapshot-3", "防抖保存没有只保留最新快照");
+                Require(MainForm.AutosaveNeedsSynchronousFallbackForTesting(false, null) && MainForm.AutosaveNeedsSynchronousFallbackForTesting(true, new IOException("save failed")) && !MainForm.AutosaveNeedsSynchronousFallbackForTesting(true, null), "关闭前自动保存失败兜底判定错误");
+                using (ManualResetEvent failedSaveCompleted = new ManualResetEvent(false))
+                using (DebouncedSaveQueue<string> failedSaveQueue = new DebouncedSaveQueue<string>(TimeSpan.Zero, delegate(string snapshot, BackgroundWorkContext context) { throw new IOException("simulated autosave failure"); }))
+                {
+                    BackgroundWorkCompletedEventArgs failedSaveResult = null;
+                    failedSaveQueue.SaveCompleted += delegate(object sender, BackgroundWorkCompletedEventArgs e) { failedSaveResult = e; failedSaveCompleted.Set(); };
+                    failedSaveQueue.QueueSave("broken");
+                    Require(failedSaveQueue.Flush(TimeSpan.FromSeconds(2)) && failedSaveCompleted.WaitOne(TimeSpan.FromSeconds(2)), "失败的后台保存没有完成通知");
+                    Require(failedSaveResult != null && failedSaveResult.Error is IOException, "后台保存错误未传播给关闭兜底逻辑");
+                }
+
+                string backgroundPngPath = Path.Combine(tempFolder, "background-export.png"), backgroundPdfPath = Path.Combine(tempFolder, "background-export.pdf");
+                using (BackgroundWorkQueue exportQueue = new BackgroundWorkQueue("RelationshipGraph.ExportSelfTest"))
+                using (ManualResetEvent exportCompleted = new ManualResetEvent(false))
+                {
+                    BackgroundWorkCompletedEventArgs exportResult = null;
+                    exportQueue.WorkCompleted += delegate(object sender, BackgroundWorkCompletedEventArgs e) { exportResult = e; exportCompleted.Set(); };
+                    exportQueue.Enqueue("background-export", delegate(BackgroundWorkContext context)
+                    {
+                        context.ReportProgress(10, "rendering"); context.ThrowIfCancellationRequested();
+                        NativeExport.SavePng(GraphSerialization.CreateImmutableSnapshot(graph), false, backgroundPngPath);
+                        context.ThrowIfCancellationRequested();
+                        NativeExport.SavePdf(GraphSerialization.CreateImmutableSnapshot(graph), backgroundPdfPath);
+                    });
+                    Require(exportCompleted.WaitOne(TimeSpan.FromSeconds(5)), "后台 PNG/PDF 导出超时");
+                    Require(exportResult != null && exportResult.Succeeded && File.Exists(backgroundPngPath) && File.Exists(backgroundPdfPath), "后台线程无法安全生成 PNG/PDF");
+                }
+
                 string htmlPath = Path.Combine(tempFolder, "readonly.html");
                 NativeExport.SaveReadonlyHtml(graph, htmlPath);
                 GraphDocument imported = GraphSerialization.LoadFile(htmlPath);
@@ -130,6 +292,11 @@ namespace RelationshipGraphNative
                 Require(NativeExport.BuildSvg(graph).Contains("data-kind="), "SVG 节点缺少只读深色主题所需的颜色分类标记");
 
                 GraphDocument endpointGraph = GraphSerialization.Clone(graph);
+                endpointGraph.nodes[0].label = "Draw.io & <节点>";
+                endpointGraph.nodes[0].type = "类型 & <测试>";
+                endpointGraph.nodes[0].shape = "decision";
+                endpointGraph.nodes[0].kind = "content";
+                endpointGraph.nodes[0].note = "Draw.io 往返备注\n第二行";
                 endpointGraph.edges.Add(new GraphEdge { id = "group_link", sourceType = "group", source = endpointGraph.groups[0].id, targetType = "group", target = endpointGraph.groups[1].id, label = "", category = "core", lineType = "straight" });
                 endpointGraph = GraphSerialization.Normalize(endpointGraph);
                 Require(endpointGraph.edges.Exists(delegate(GraphEdge edge) { return edge.id == "group_link" && edge.sourceType == "group" && edge.targetType == "group" && edge.label == ""; }), "分组关系或空名称兼容失败");
@@ -141,6 +308,93 @@ namespace RelationshipGraphNative
                 Require(drawio.Contains("vertex=\"1\"") && drawio.Contains("locked=0") && drawio.Contains("id=\"n_"), "飞书画板节点不是独立可移动图形");
                 Require(drawio.Contains("id=\"g_") && drawio.Contains("container=1") && drawio.Contains("id=\"e_group_link\""), "飞书画板分组或连线导出失败");
                 Require(drawio.Contains("source=\"g_") && drawio.Contains("target=\"g_"), "飞书画板分组关系未保持连接");
+                Require(drawio.Contains("rgFormat=\"relationship-graph-v1\"") && drawio.Contains("rgShape=\"decision\"") && drawio.Contains("rhombus;"), "Draw.io 导出缺少可逆元数据或流程图形状");
+
+                string drawioNotice;
+                GraphDocument importedDrawio = GraphSerialization.LoadFile(drawioPath, out drawioNotice);
+                GraphNode originalDrawioNode = endpointGraph.nodes[0];
+                GraphNode importedDrawioNode = importedDrawio.nodes.First(delegate(GraphNode node) { return node.id == originalDrawioNode.id; });
+                Require(drawioNotice.Length == 0 && importedDrawio.meta.title == endpointGraph.meta.title && importedDrawio.meta.diagramType == endpointGraph.meta.diagramType, "本工具 Draw.io 标题或图类型往返失败");
+                Require(importedDrawio.groups.Count == endpointGraph.groups.Count && importedDrawio.nodes.Count == endpointGraph.nodes.Count && importedDrawio.edges.Count == endpointGraph.edges.Count, "本工具 Draw.io 对象数量往返失败");
+                Require(importedDrawioNode.type == originalDrawioNode.type && importedDrawioNode.label == originalDrawioNode.label && importedDrawioNode.kind == "content" && importedDrawioNode.shape == "decision" && importedDrawioNode.note == "Draw.io 往返备注\n第二行", "Draw.io 节点属性往返失败");
+                Require(Math.Abs(importedDrawioNode.x - originalDrawioNode.x) < .01f && Math.Abs(importedDrawioNode.y - originalDrawioNode.y) < .01f, "Draw.io 往返未恢复原始画布位置");
+                Require(importedDrawio.edges.Exists(delegate(GraphEdge edge) { return edge.id == "group_link" && edge.sourceType == "group" && edge.targetType == "group" && edge.lineType == "straight"; }), "Draw.io 分组关系往返失败");
+
+                string legacyDrawioPath = Path.Combine(tempFolder, "legacy-export.drawio");
+                string legacyDrawio = System.Text.RegularExpressions.Regex.Replace(drawio, "\\s+rg[A-Za-z]+=[\"'][^\"']*[\"']", "");
+                File.WriteAllText(legacyDrawioPath, legacyDrawio, new UTF8Encoding(false));
+                GraphDocument legacyImportedDrawio = GraphSerialization.LoadFile(legacyDrawioPath, out drawioNotice);
+                GraphNode legacyImportedNode = legacyImportedDrawio.nodes.First(delegate(GraphNode node) { return node.label == "Draw.io & <节点>"; });
+                Require(legacyImportedDrawio.nodes.Count == endpointGraph.nodes.Count && legacyImportedDrawio.groups.Count == endpointGraph.groups.Count && legacyImportedDrawio.edges.Count == endpointGraph.edges.Count, "旧版 Draw.io 导出文件对象导入失败");
+                Require(legacyImportedNode.type == "类型 & <测试>" && legacyImportedNode.kind == "content" && legacyImportedDrawio.edges.Exists(delegate(GraphEdge edge) { return edge.sourceType == "group" && edge.targetType == "group"; }), "旧版 Draw.io 文字、颜色或分组端点兼容失败");
+
+                string genericDrawioPath = Path.Combine(tempFolder, "generic-multipage.drawio");
+                string genericDrawio = @"<?xml version=""1.0"" encoding=""UTF-8""?><mxfile><diagram name=""通用第一页""><mxGraphModel><root><mxCell id=""0""/><mxCell id=""1"" parent=""0""/><mxCell id=""lane"" value=""业务域"" style=""swimlane;container=1;"" vertex=""1"" parent=""1""><mxGeometry x=""100"" y=""80"" width=""500"" height=""300"" as=""geometry""/></mxCell><object id=""wrapped"" label=""包装 &lt;API&gt; &amp; 节点""><mxCell style=""rounded=1;fillColor=#dcecff;"" vertex=""1"" parent=""lane""><mxGeometry x=""40"" y=""60"" width=""140"" height=""60"" as=""geometry""/></mxCell></object><mxCell id=""wrapped-port"" style=""ellipse;"" vertex=""1"" parent=""wrapped""><mxGeometry x=""1"" y=""0.5"" width=""8"" height=""8"" relative=""1"" as=""geometry""/></mxCell><UserObject id=""user-object"" label=""用户对象""><mxCell style=""rounded=1;"" vertex=""1"" parent=""lane""><mxGeometry x=""40"" y=""180"" width=""140"" height=""60"" as=""geometry""/></mxCell></UserObject><mxCell id=""decision"" value=""&lt;b&gt;审批&lt;/b&gt;"" style=""rhombus;whiteSpace=wrap;html=1;"" vertex=""1"" parent=""lane""><mxGeometry x=""260"" y=""70"" width=""120"" height=""80"" as=""geometry""/></mxCell><mxCell id=""link"" value="""" style=""edgeStyle=orthogonalEdgeStyle;entryX=0;entryY=0.5;"" edge=""1"" parent=""1"" source=""wrapped-port"" target=""decision""><mxGeometry relative=""1"" as=""geometry""/></mxCell><mxCell id=""link-label"" value=""调用"" style=""edgeLabel;html=1;"" vertex=""1"" parent=""link""><mxGeometry relative=""1"" as=""geometry""/></mxCell><mxCell id=""dangling"" edge=""1"" parent=""1"" source=""wrapped"" target=""missing""><mxGeometry relative=""1"" as=""geometry""/></mxCell></root></mxGraphModel></diagram><diagram name=""第二页""><mxGraphModel><root><mxCell id=""0""/><mxCell id=""1"" parent=""0""/><mxCell id=""ignored"" value=""不应导入"" vertex=""1"" parent=""1""><mxGeometry x=""0"" y=""0"" width=""120"" height=""50"" as=""geometry""/></mxCell></root></mxGraphModel></diagram></mxfile>";
+                File.WriteAllText(genericDrawioPath, genericDrawio, new UTF8Encoding(false));
+                GraphDocument genericImported = GraphSerialization.LoadFile(genericDrawioPath, out drawioNotice);
+                GraphNode wrappedNode = genericImported.nodes.First(delegate(GraphNode node) { return node.label == "包装 <API> & 节点"; });
+                GraphNode decisionNode = genericImported.nodes.First(delegate(GraphNode node) { return node.label == "审批"; });
+                Require(genericImported.meta.title == "通用第一页" && drawioNotice.Contains("2") && drawioNotice.Contains("1 条") && genericImported.groups.Count == 1 && genericImported.nodes.Count == 3 && genericImported.edges.Count == 1, "通用多页 Draw.io 导入范围或忽略提示错误");
+                Require(Math.Abs(wrappedNode.x - 140f) < .01f && Math.Abs(wrappedNode.y - 140f) < .01f && wrappedNode.group == genericImported.groups[0].id && wrappedNode.kind == "resource", "Draw.io 包装节点、父坐标或分组归属导入失败");
+                Require(genericImported.nodes.Exists(delegate(GraphNode node) { return node.label == "用户对象"; }) && decisionNode.shape == "decision" && genericImported.edges[0].label == "调用" && genericImported.edges[0].lineType == "polyline" && genericImported.edges[0].sourceSide == "right" && genericImported.edges[0].targetSide == "left", "Draw.io UserObject、形状、关系名称、线型或相对端口导入失败");
+
+                IList<DrawioPageInfo> genericPageInfos = NativeDrawioImport.GetPageInfos(genericDrawio, "后备标题");
+                Require(genericPageInfos.Count == 2 && genericPageInfos[0].Index == 0 && genericPageInfos[0].Name == "通用第一页" && genericPageInfos[0].DisplayName == "通用第一页" && !genericPageInfos[0].IsBareModel &&
+                    genericPageInfos[1].Index == 1 && genericPageInfos[1].Name == "第二页" && genericPageInfos[1].DisplayName == "第二页" && !genericPageInfos[1].IsBareModel,
+                    "Draw.io 多页面信息枚举的数量、索引或名称错误");
+                string contentDetectedDrawioPath = Path.Combine(tempFolder, "content-detected.txt");
+                File.WriteAllText(contentDetectedDrawioPath, genericDrawio, new UTF8Encoding(false));
+                IList<DrawioPageInfo> contentDetectedPages;
+                Require(GraphSerialization.TryGetDrawioPageInfos(contentDetectedDrawioPath, out contentDetectedPages) && contentDetectedPages.Count == 2, "非标准扩展名的 Draw.io 未进入多页面识别流程");
+                string jsonNamedDrawioPath = Path.Combine(tempFolder, "content-detected.json");
+                File.WriteAllText(jsonNamedDrawioPath, genericDrawio, new UTF8Encoding(false));
+                Require(GraphSerialization.TryGetDrawioPageInfos(jsonNamedDrawioPath, out contentDetectedPages) && contentDetectedPages.Count == 2, "以 .json 命名的 Draw.io 未进入多页面识别流程");
+                string selectedPageNotice;
+                GraphDocument selectedSecondPage = NativeDrawioImport.ImportPage(genericDrawio, "后备标题", 1, out selectedPageNotice);
+                Require(selectedSecondPage.meta.title == "第二页" && selectedSecondPage.groups.Count == 0 && selectedSecondPage.nodes.Count == 1 && selectedSecondPage.nodes[0].label == "不应导入" && selectedSecondPage.edges.Count == 0,
+                    "Draw.io 未按索引导入第二页内容");
+                Require(selectedPageNotice.Contains("第 2 页") && selectedPageNotice.Contains("第二页") && selectedPageNotice.Contains("索引 1") && selectedPageNotice.Contains("其余 1 个页面未导入"),
+                    "Draw.io 按页导入提示没有明确说明所选页面或未导入页数");
+                bool drawioPageIndexRejected = false;
+                try { NativeDrawioImport.ImportPage(genericDrawio, "后备标题", 2, out selectedPageNotice); }
+                catch (ArgumentOutOfRangeException error)
+                {
+                    drawioPageIndexRejected = error.ParamName == "pageIndex" && error.Message.Contains("共有 2 个页面") && error.Message.Contains("0 到 1");
+                }
+                Require(drawioPageIndexRejected, "Draw.io 越界页面索引未被明确拒绝");
+
+                string compressedDrawioPath = Path.Combine(tempFolder, "compressed.drawio");
+                string compressedPayload = "vZPBboMwDIafxvc02bT0CC30tFOfIBCLoAWCTCjt20+QtF1FW3XStAuK/9924i8ExKY57kh15tNptCAyEBtyzodVc9ygtcBZrUFsgXMGnAPPH7ir2WWdImz9KwUqFByUHTAokEmQCUgO2cf0TdfAWRLSen+yMY3c0GqcuqxApKOpPe47VU7uSKoDkRrf2GjHTZA8Hh8edJbiKXfoGvR0As7OBWEOdgphHIuNtfYmZpw1g3VlYtP3qKk+xNWl8RUK8Dxyuc+oeI1RumRkXFMM/b/wuUz6BBC7A0j+ASC8CyhlIMUEaP0GiVzAQV3hPoaOvHGVa5XNrmqKrU6I3AhiW1hXfl1ATaXPMXHWu4FKvPnJvaIK/Y87XcIktMrXh9vuv0ADPL++3dm7edrf";
+                File.WriteAllText(compressedDrawioPath, "<mxfile><diagram name=\"压缩页\">" + compressedPayload + "</diagram></mxfile>", new UTF8Encoding(false));
+                GraphDocument compressedImported = GraphSerialization.LoadFile(compressedDrawioPath, out drawioNotice);
+                Require(compressedImported.meta.title == "压缩页" && compressedImported.nodes.Count == 2 && compressedImported.edges.Count == 1, "压缩 Draw.io 页面导入失败");
+                Require(compressedImported.nodes.Exists(delegate(GraphNode node) { return node.label == "节点 A"; }) && compressedImported.nodes.Exists(delegate(GraphNode node) { return node.label == "节点 B" && node.shape == "decision"; }), "压缩 Draw.io 中文或形状解码失败");
+                Require(compressedImported.edges[0].label == "调用" && compressedImported.edges[0].lineType == "polyline", "压缩 Draw.io 关系解码失败");
+
+                string bareDrawioPath = Path.Combine(tempFolder, "bare-model.xml");
+                File.WriteAllText(bareDrawioPath, "<mxGraphModel><root><mxCell id=\"0\"/><mxCell id=\"1\" parent=\"0\"/><mxCell id=\"bare\" value=\"独立模型\" vertex=\"1\" parent=\"1\"><mxGeometry x=\"20\" y=\"30\" width=\"130\" height=\"50\" as=\"geometry\"/></mxCell></root></mxGraphModel>", new UTF8Encoding(false));
+                GraphDocument bareImported = GraphSerialization.LoadFile(bareDrawioPath, out drawioNotice);
+                Require(bareImported.nodes.Count == 1 && bareImported.nodes[0].label == "独立模型", "独立 mxGraphModel 导入失败");
+
+                string escapedDrawioPath = Path.Combine(tempFolder, "escaped-page.drawio");
+                string escapedModel = "<mxGraphModel><root><mxCell id=\"0\"/><mxCell id=\"1\" parent=\"0\"/><mxCell id=\"escaped\" value=\"A &lt; B &gt; C\" vertex=\"1\" parent=\"1\"><mxGeometry x=\"20\" y=\"30\" width=\"130\" height=\"50\" as=\"geometry\"/></mxCell></root></mxGraphModel>";
+                File.WriteAllText(escapedDrawioPath, "<mxfile><diagram name=\"转义页\">" + System.Security.SecurityElement.Escape(escapedModel) + "</diagram></mxfile>", new UTF8Encoding(false));
+                GraphDocument escapedImported = GraphSerialization.LoadFile(escapedDrawioPath, out drawioNotice);
+                Require(escapedImported.meta.title == "转义页" && escapedImported.nodes.Count == 1 && escapedImported.nodes[0].label == "A < B > C", "转义 Draw.io 页面或纯文本尖括号导入失败");
+
+                bool invalidDrawioRejected = false;
+                string invalidDrawioPath = Path.Combine(tempFolder, "invalid.drawio");
+                File.WriteAllText(invalidDrawioPath, "<mxfile><diagram>不是有效的压缩内容</diagram></mxfile>", new UTF8Encoding(false));
+                try { GraphSerialization.LoadFile(invalidDrawioPath); }
+                catch (InvalidDataException) { invalidDrawioRejected = true; }
+                Require(invalidDrawioRejected, "损坏的 Draw.io 压缩内容未被安全拒绝");
+
+                bool drawioDtdRejected = false;
+                string dtdDrawioPath = Path.Combine(tempFolder, "dtd.drawio");
+                File.WriteAllText(dtdDrawioPath, "<!DOCTYPE mxfile [<!ENTITY unsafe SYSTEM \"file:///C:/Windows/win.ini\">]><mxfile><diagram name=\"DTD\"><mxGraphModel><root><mxCell id=\"0\"/><mxCell id=\"1\" parent=\"0\"/><mxCell id=\"n\" value=\"&unsafe;\" vertex=\"1\" parent=\"1\"><mxGeometry x=\"0\" y=\"0\" width=\"120\" height=\"50\" as=\"geometry\"/></mxCell></root></mxGraphModel></diagram></mxfile>", new UTF8Encoding(false));
+                try { GraphSerialization.LoadFile(dtdDrawioPath); }
+                catch (InvalidDataException) { drawioDtdRejected = true; }
+                Require(drawioDtdRejected, "Draw.io XML 外部实体未被安全拒绝");
 
                 string pngPath = Path.Combine(tempFolder, "graph.png"), pdfPath = Path.Combine(tempFolder, "graph.pdf");
                 using (GraphCanvas canvas = new GraphCanvas())
@@ -477,6 +731,14 @@ namespace RelationshipGraphNative
                 Require(nestedGraph.nodes[0].groups.SequenceEqual(new[] { "menu", "menu_theme" }) && nestedGraph.nodes[0].group == "menu_theme", "节点未自动匹配多层分组");
                 string nestedDrawio = NativeExport.BuildDrawio(nestedGraph); int nestedGroupStart = nestedDrawio.IndexOf("id=\"g_menu_theme\"", StringComparison.Ordinal);
                 Require(nestedGroupStart >= 0 && nestedDrawio.Substring(nestedGroupStart, Math.Min(700, nestedDrawio.Length - nestedGroupStart)).Contains("parent=\"g_menu\""), "飞书画板导出未保留分组嵌套");
+                string nestedDrawioPath = Path.Combine(tempFolder, "nested.drawio");
+                File.WriteAllText(nestedDrawioPath, nestedDrawio, new UTF8Encoding(false));
+                string nestedDrawioNotice;
+                GraphDocument importedNestedGraph = GraphSerialization.LoadFile(nestedDrawioPath, out nestedDrawioNotice);
+                GraphGroup importedNestedInner = importedNestedGraph.groups.First(delegate(GraphGroup item) { return item.id == "menu_theme"; });
+                GraphNode importedNestedNode = importedNestedGraph.nodes.First(delegate(GraphNode item) { return item.id == "theme_node"; });
+                Require(nestedDrawioNotice.Length == 0 && importedNestedInner.groups.SequenceEqual(new[] { "menu" }) && importedNestedNode.groups.SequenceEqual(new[] { "menu", "menu_theme" }), "Draw.io 导入未恢复多层分组归属");
+                Require(Math.Abs(importedNestedInner.x - nestedInner.x) < .01f && Math.Abs(importedNestedInner.y - nestedInner.y) < .01f && Math.Abs(importedNestedNode.x - nestedGraph.nodes[0].x) < .01f && Math.Abs(importedNestedNode.y - nestedGraph.nodes[0].y) < .01f, "Draw.io 导入未恢复嵌套对象的绝对位置");
                 using (MainForm nestedWindow = new MainForm(nestedGraph, false))
                 {
                     nestedWindow.WindowState = FormWindowState.Normal; nestedWindow.Size = new System.Drawing.Size(1200, 760); nestedWindow.CreateControl(); nestedWindow.PerformLayout();
@@ -666,6 +928,223 @@ namespace RelationshipGraphNative
                 unsafeCoordinateGraph = GraphSerialization.Normalize(unsafeCoordinateGraph);
                 Require(unsafeCoordinateGraph.nodes[0].x == GraphSerialization.MaxCoordinate && unsafeCoordinateGraph.nodes[0].y == -GraphSerialization.MaxCoordinate, "超出安全绘制范围的有限坐标未收敛");
 
+                GraphDocument automaticLayoutGraph = GraphSerialization.CreateBlank("自动排版回归测试");
+                automaticLayoutGraph.nodes.Add(new GraphNode { id = "layout_a", label = "起点", type = "步骤", kind = "system", group = "", x = 100, y = 100, w = 150, h = 54, note = "" });
+                automaticLayoutGraph.nodes.Add(new GraphNode { id = "layout_b", label = "分支甲", type = "步骤", kind = "resource", group = "", x = 100, y = 100, w = 150, h = 54, note = "" });
+                automaticLayoutGraph.nodes.Add(new GraphNode { id = "layout_c", label = "分支乙", type = "步骤", kind = "content", group = "", x = 100, y = 100, w = 150, h = 54, note = "" });
+                automaticLayoutGraph.nodes.Add(new GraphNode { id = "layout_d", label = "分支丙", type = "步骤", kind = "staff", group = "", x = 100, y = 100, w = 150, h = 54, note = "" });
+                automaticLayoutGraph.nodes.Add(new GraphNode { id = "layout_e", label = "终点", type = "步骤", kind = "output", group = "", x = 100, y = 100, w = 150, h = 54, note = "" });
+                automaticLayoutGraph.edges.Add(new GraphEdge { id = "layout_ab", source = "layout_a", target = "layout_b", sourceType = "node", targetType = "node", label = "路径甲", category = "core", lineType = "polyline" });
+                automaticLayoutGraph.edges.Add(new GraphEdge { id = "layout_ac", source = "layout_a", target = "layout_c", sourceType = "node", targetType = "node", label = "路径乙", category = "core", lineType = "polyline" });
+                automaticLayoutGraph.edges.Add(new GraphEdge { id = "layout_ad", source = "layout_a", target = "layout_d", sourceType = "node", targetType = "node", label = "路径丙", category = "core", lineType = "polyline" });
+                automaticLayoutGraph.edges.Add(new GraphEdge { id = "layout_be", source = "layout_b", target = "layout_e", sourceType = "node", targetType = "node", label = "汇总甲", category = "core", lineType = "polyline" });
+                automaticLayoutGraph.edges.Add(new GraphEdge { id = "layout_ce", source = "layout_c", target = "layout_e", sourceType = "node", targetType = "node", label = "汇总乙", category = "core", lineType = "polyline" });
+                automaticLayoutGraph.edges.Add(new GraphEdge { id = "layout_de", source = "layout_d", target = "layout_e", sourceType = "node", targetType = "node", label = "汇总丙", category = "core", lineType = "polyline" });
+                automaticLayoutGraph.edges.Add(new GraphEdge { id = "layout_ae", source = "layout_a", target = "layout_e", sourceType = "node", targetType = "node", label = "直达", category = "core", lineType = "polyline" });
+                automaticLayoutGraph = GraphSerialization.Normalize(automaticLayoutGraph);
+                GraphLayoutResult automaticLayout = GraphLayout.Calculate(automaticLayoutGraph);
+                GraphLayoutResult repeatedAutomaticLayout = GraphLayout.Calculate(automaticLayoutGraph);
+                Require(LayoutResultsMatch(automaticLayout, repeatedAutomaticLayout), "同一关系图的自动排版结果不确定");
+                int layoutCancellationChecks = 0; bool layoutCancellationObserved = false;
+                GraphLayoutOptions cancellingLayoutOptions = GraphLayoutOptions.ForDocument(automaticLayoutGraph);
+                cancellingLayoutOptions.CancellationRequested = delegate { layoutCancellationChecks++; return layoutCancellationChecks >= 3; };
+                try { GraphLayout.Calculate(automaticLayoutGraph, cancellingLayoutOptions); }
+                catch (OperationCanceledException) { layoutCancellationObserved = true; }
+                Require(layoutCancellationObserved, "自动排版没有在安全检查点响应取消请求");
+                bool automaticPositionChanged = false;
+                List<RectangleF> automaticNodeBounds = new List<RectangleF>();
+                foreach (GraphNode node in automaticLayoutGraph.nodes)
+                {
+                    RectangleF bounds;
+                    Require(automaticLayout.TryGetNodeBounds(node.id, out bounds), "自动排版遗漏节点：" + node.id);
+                    if (Math.Abs(bounds.X - node.x) > .01f || Math.Abs(bounds.Y - node.y) > .01f) automaticPositionChanged = true;
+                    automaticNodeBounds.Add(bounds);
+                }
+                Require(automaticPositionChanged, "自动排版未改变重叠节点位置");
+                for (int firstIndex = 0; firstIndex < automaticNodeBounds.Count; firstIndex++)
+                    for (int secondIndex = firstIndex + 1; secondIndex < automaticNodeBounds.Count; secondIndex++)
+                        Require(!automaticNodeBounds[firstIndex].IntersectsWith(automaticNodeBounds[secondIndex]), "自动排版后节点仍相互重叠");
+
+                List<PointF> fanOutPorts = new List<PointF>();
+                foreach (string edgeId in new[] { "layout_ab", "layout_ac", "layout_ad", "layout_ae" })
+                {
+                    GraphEdgeLayout route;
+                    Require(automaticLayout.TryGetEdge(edgeId, out route), "自动路由遗漏同源关系：" + edgeId);
+                    Require(route.SourceSide == "right", "从左到右排版未从起点右侧出线：" + edgeId);
+                    for (int portIndex = 0; portIndex < fanOutPorts.Count; portIndex++)
+                        Require(!PointsClose(fanOutPorts[portIndex], route.SourcePoint), "同端口多条关系仍使用同一个端口点");
+                    fanOutPorts.Add(route.SourcePoint);
+                }
+
+                List<RectangleF> labelBounds = new List<RectangleF>();
+                foreach (GraphEdge edge in automaticLayoutGraph.edges)
+                {
+                    GraphEdgeLayout route;
+                    Require(automaticLayout.TryGetEdge(edge.id, out route), "自动排版遗漏关系路线：" + edge.id);
+                    Require(!route.HasObstacleConflict, "自动路线仍存在障碍冲突：" + edge.id);
+                    Require(RouteIsOrthogonal(route.Points), "自动路线包含非正交线段：" + edge.id);
+                    foreach (KeyValuePair<string, RectangleF> nodeBounds in automaticLayout.NodeBounds)
+                        Require(!RouteCrossesRectangleInterior(route.Points, nodeBounds.Value), "自动路线穿过节点：" + edge.id + " / " + nodeBounds.Key);
+                    Require(!String.IsNullOrWhiteSpace(edge.label) && !route.LabelBounds.IsEmpty, "非空关系名称没有标签边界：" + edge.id);
+                    for (int labelIndex = 0; labelIndex < labelBounds.Count; labelIndex++)
+                        Require(!labelBounds[labelIndex].IntersectsWith(route.LabelBounds), "自动关系标签仍相互重叠");
+                    labelBounds.Add(route.LabelBounds);
+                }
+
+                GraphDocument flowLayoutGraph = GraphSerialization.CreateBlank("流程图自动排版方向测试");
+                flowLayoutGraph.meta.diagramType = "flowchart";
+                flowLayoutGraph.nodes.Add(new GraphNode { id = "flow_top", label = "开始", type = "步骤", kind = "system", shape = "terminator", group = "", x = 200, y = 200, w = 150, h = 54, note = "" });
+                flowLayoutGraph.nodes.Add(new GraphNode { id = "flow_middle", label = "处理", type = "步骤", kind = "resource", shape = "decision", group = "", x = 200, y = 200, w = 150, h = 54, note = "" });
+                flowLayoutGraph.nodes.Add(new GraphNode { id = "flow_bottom", label = "结束", type = "步骤", kind = "output", shape = "document", group = "", x = 200, y = 200, w = 150, h = 54, note = "" });
+                flowLayoutGraph.edges.Add(new GraphEdge { id = "flow_first", source = "flow_top", target = "flow_middle", sourceType = "node", targetType = "node", label = "执行", category = "core", lineType = "polyline" });
+                flowLayoutGraph.edges.Add(new GraphEdge { id = "flow_second", source = "flow_middle", target = "flow_bottom", sourceType = "node", targetType = "node", label = "完成", category = "core", lineType = "polyline" });
+                flowLayoutGraph = GraphSerialization.Normalize(flowLayoutGraph);
+                GraphLayoutResult flowLayout = GraphLayout.Calculate(flowLayoutGraph);
+                RectangleF flowTop = RectangleF.Empty, flowMiddle = RectangleF.Empty, flowBottom = RectangleF.Empty;
+                Require(flowLayout.TryGetNodeBounds("flow_top", out flowTop) && flowLayout.TryGetNodeBounds("flow_middle", out flowMiddle) && flowLayout.TryGetNodeBounds("flow_bottom", out flowBottom), "流程图自动排版遗漏节点");
+                Require(flowTop.Top < flowMiddle.Top && flowMiddle.Top < flowBottom.Top, "流程图没有按从上到下方向排版");
+                GraphEdgeLayout flowFirstRoute = null, flowSecondRoute = null;
+                Require(flowLayout.TryGetEdge("flow_first", out flowFirstRoute) && flowLayout.TryGetEdge("flow_second", out flowSecondRoute), "流程图自动路由遗漏关系");
+                Require(flowFirstRoute.SourceSide == "bottom" && flowFirstRoute.TargetSide == "top" && flowSecondRoute.SourceSide == "bottom" && flowSecondRoute.TargetSide == "top", "流程图关系没有使用上下端口");
+                string flowExportSvg = NativeExport.BuildSvg(flowLayoutGraph);
+                Require(flowExportSvg.Contains("data-shape=\"terminator\"") && flowExportSvg.Contains("data-shape=\"decision\"") && flowExportSvg.Contains("data-shape=\"document\"") && flowExportSvg.Contains("<polygon") && flowExportSvg.Contains("<path"), "SVG/只读 HTML 未保留流程图形状");
+                Require(!flowExportSvg.Contains(">步骤</text>"), "流程图 SVG 仍错误导出节点类型");
+                byte[] flowExportPdf = NativePdfExport.Build(flowLayoutGraph);
+                Require(flowExportPdf.Length > 500 && Encoding.ASCII.GetString(flowExportPdf, 0, Math.Min(flowExportPdf.Length, 16)).StartsWith("%PDF-1.4", StringComparison.Ordinal), "流程图 PDF 形状导出失败");
+
+                GraphDocument lineStyleGraph = GraphSerialization.CreateBlank("自动避障与传统线型测试");
+                lineStyleGraph.nodes.Add(new GraphNode { id = "style_auto_a", label = "自动 A", type = "步骤", kind = "system", group = "", x = 40, y = 40, w = 150, h = 54, note = "" });
+                lineStyleGraph.nodes.Add(new GraphNode { id = "style_auto_b", label = "自动 B", type = "步骤", kind = "resource", group = "", x = 420, y = 180, w = 150, h = 54, note = "" });
+                lineStyleGraph.nodes.Add(new GraphNode { id = "style_curve_a", label = "曲线 A", type = "步骤", kind = "content", group = "", x = 40, y = 360, w = 150, h = 54, note = "" });
+                lineStyleGraph.nodes.Add(new GraphNode { id = "style_curve_b", label = "曲线 B", type = "步骤", kind = "output", group = "", x = 420, y = 460, w = 150, h = 54, note = "" });
+                lineStyleGraph.edges.Add(new GraphEdge { id = "style_auto_edge", source = "style_auto_a", target = "style_auto_b", sourceType = "node", targetType = "node", label = "自动", category = "core", lineType = "auto" });
+                lineStyleGraph.edges.Add(new GraphEdge { id = "style_curve_edge", source = "style_curve_a", target = "style_curve_b", sourceType = "node", targetType = "node", label = "曲线", category = "core", lineType = "curve" });
+                lineStyleGraph = GraphSerialization.Normalize(lineStyleGraph);
+                string lineStyleSvg = NativeExport.BuildSvg(lineStyleGraph);
+                int autoStyleStart = lineStyleSvg.IndexOf("data-id=\"style_auto_edge\"", StringComparison.Ordinal), curveStyleStart = lineStyleSvg.IndexOf("data-id=\"style_curve_edge\"", StringComparison.Ordinal);
+                Require(autoStyleStart >= 0 && curveStyleStart >= 0, "线型 SVG 缺少测试关系");
+                int autoStyleEnd = lineStyleSvg.IndexOf("</g>", autoStyleStart, StringComparison.Ordinal), curveStyleEnd = lineStyleSvg.IndexOf("</g>", curveStyleStart, StringComparison.Ordinal);
+                string autoStyleFragment = lineStyleSvg.Substring(autoStyleStart, autoStyleEnd - autoStyleStart);
+                string curveStyleFragment = lineStyleSvg.Substring(curveStyleStart, curveStyleEnd - curveStyleStart);
+                Require(autoStyleFragment.Contains(" L ") && !autoStyleFragment.Contains(" C "), "自动避障关系未导出为正交路线");
+                Require(curveStyleFragment.Contains(" C "), "曲线关系被后台自动路由覆盖");
+                string autoLineDrawioPath = Path.Combine(tempFolder, "auto-line.drawio");
+                NativeExport.SaveDrawio(lineStyleGraph, autoLineDrawioPath);
+                string autoLineNotice;
+                GraphDocument autoLineRoundTrip = GraphSerialization.LoadFile(autoLineDrawioPath, out autoLineNotice);
+                Require(autoLineRoundTrip.edges.Any(delegate(GraphEdge edge) { return edge.id == "style_auto_edge" && edge.lineType == "auto"; }), "Draw.io 往返未保留自动避障线型");
+
+                GraphDocument routeOnlyGraph = GraphSerialization.CreateBlank("仅路由保留边界测试");
+                routeOnlyGraph.groups.Add(new GraphGroup { id = "route_group", label = "保留分组", x = -180.25f, y = 65.5f, w = 520.75f, h = 310.25f });
+                routeOnlyGraph.nodes.Add(new GraphNode { id = "route_left", label = "左侧", type = "步骤", kind = "system", group = "", x = -120.5f, y = 130.25f, w = 137.5f, h = 51.25f, note = "" });
+                routeOnlyGraph.nodes.Add(new GraphNode { id = "route_right", label = "右侧", type = "步骤", kind = "output", group = "", x = 430.75f, y = 245.5f, w = 166.25f, h = 62.75f, note = "" });
+                routeOnlyGraph.edges.Add(new GraphEdge { id = "route_only_edge", source = "route_left", target = "route_right", sourceType = "node", targetType = "node", label = "只调整路线", category = "core", lineType = "polyline" });
+                routeOnlyGraph = GraphSerialization.Normalize(routeOnlyGraph);
+                string routeOnlyBefore = GraphSerialization.Serialize(routeOnlyGraph, false);
+                GraphLayoutResult routeOnlyLayout = GraphLayout.CalculateRoutes(routeOnlyGraph);
+                Require(routeOnlyBefore == GraphSerialization.Serialize(routeOnlyGraph, false), "CalculateRoutes 修改了原关系图");
+                foreach (GraphNode node in routeOnlyGraph.nodes)
+                {
+                    RectangleF bounds;
+                    Require(routeOnlyLayout.TryGetNodeBounds(node.id, out bounds) && RectangleMatchesNode(bounds, node), "CalculateRoutes 改变了节点边界：" + node.id);
+                }
+                foreach (GraphGroup group in routeOnlyGraph.groups)
+                {
+                    RectangleF bounds;
+                    Require(routeOnlyLayout.TryGetGroupBounds(group.id, out bounds) && RectangleMatchesGroup(bounds, group), "CalculateRoutes 改变了分组边界：" + group.id);
+                }
+
+                GraphDocument groupObstacleGraph = GraphSerialization.CreateBlank("分组避障测试");
+                groupObstacleGraph.groups.Add(new GraphGroup { id = "blocking_group", label = "不可穿越标题区", x = 250, y = 60, w = 220, h = 190 });
+                groupObstacleGraph.nodes.Add(new GraphNode { id = "outside_left", label = "左", type = "步骤", kind = "system", group = "", x = 20, y = 120, w = 150, h = 54, note = "" });
+                groupObstacleGraph.nodes.Add(new GraphNode { id = "outside_right", label = "右", type = "步骤", kind = "output", group = "", x = 560, y = 120, w = 150, h = 54, note = "" });
+                groupObstacleGraph.edges.Add(new GraphEdge { id = "around_group", source = "outside_left", target = "outside_right", sourceType = "node", targetType = "node", label = "绕过分组", category = "core", lineType = "auto" });
+                groupObstacleGraph = GraphSerialization.Normalize(groupObstacleGraph);
+                GraphLayoutResult groupObstacleLayout = GraphLayout.CalculateRoutes(groupObstacleGraph);
+                GraphEdgeLayout aroundGroupRoute;
+                Require(groupObstacleLayout.TryGetEdge("around_group", out aroundGroupRoute) && !aroundGroupRoute.HasObstacleConflict, "自动路线未能绕开无关分组");
+                Require(!RouteCrossesRectangleInterior(aroundGroupRoute.Points, new RectangleF(250, 60, 220, 190)), "自动路线穿过无关分组或标题区域");
+
+                GraphDocument automaticCanvasGraph = GraphSerialization.Clone(automaticLayoutGraph);
+                GraphLayoutResult automaticCanvasLayout = GraphLayout.Calculate(automaticCanvasGraph);
+                string automaticCanvasBefore = GraphSerialization.Serialize(automaticCanvasGraph, false);
+                using (GraphCanvas automaticCanvas = new GraphCanvas())
+                using (Bitmap automaticFrame = new Bitmap(900, 650))
+                {
+                    automaticCanvas.Size = new Size(900, 650); automaticCanvas.Document = automaticCanvasGraph; automaticCanvas.EditMode = true;
+                    Require(automaticCanvas.ApplyAutomaticLayout(automaticCanvasLayout, automaticCanvasBefore), "GraphCanvas 未应用自动排版");
+                    Require(automaticCanvasGraph.edges.All(delegate(GraphEdge edge) { return edge.lineType == "auto"; }), "自动排版未将关系切换为自动避障线型");
+                    Require(automaticCanvas.HasAutomaticRoutingForTesting, "GraphCanvas 应用自动排版后未使用自动路线");
+                    RectangleF canvasContent = automaticCanvas.ContentBoundsForTesting(0);
+                    Require(FinitePositiveRectangle(canvasContent), "自动排版后的画布内容边界无效");
+                    Rectangle miniMap = automaticCanvas.MiniMapBoundsForTesting;
+                    Require(miniMap.Width > 0 && miniMap.Height > 0 && miniMap.Left >= 0 && miniMap.Top >= 0 && miniMap.Right <= automaticCanvas.ClientSize.Width && miniMap.Bottom <= automaticCanvas.ClientSize.Height, "自动排版后小地图边界无效");
+                    automaticCanvas.DrawToBitmap(automaticFrame, new Rectangle(0, 0, automaticFrame.Width, automaticFrame.Height));
+                    Require(automaticCanvas.HasAutomaticRoutingForTesting, "绘制小地图或画布后自动路线丢失");
+                }
+
+                GraphDocument keyboardGraph = GraphSerialization.CreateBlank("键盘与无障碍测试");
+                keyboardGraph.nodes.Add(new GraphNode { id = "keyboard_left", label = "左侧节点", type = "步骤", kind = "system", group = "", x = 40, y = 100, w = 150, h = 54, note = "键盘说明" });
+                keyboardGraph.nodes.Add(new GraphNode { id = "keyboard_right", label = "右侧节点", type = "步骤", kind = "resource", group = "", x = 420, y = 100, w = 150, h = 54, note = "" });
+                keyboardGraph.nodes.Add(new GraphNode { id = "keyboard_down", label = "下方节点", type = "步骤", kind = "output", group = "", x = 40, y = 360, w = 150, h = 54, note = "" });
+                keyboardGraph = GraphSerialization.Normalize(keyboardGraph);
+                using (GraphCanvas keyboardCanvas = new GraphCanvas())
+                {
+                    keyboardCanvas.Size = new System.Drawing.Size(900, 650); keyboardCanvas.Document = keyboardGraph; keyboardCanvas.EditMode = true; keyboardCanvas.CreateControl();
+                    keyboardCanvas.SelectEntity("node", "keyboard_left"); float originalX = keyboardGraph.nodes[0].x;
+                    keyboardCanvas.NudgeSelectionForTesting(5, 0);
+                    Require(Math.Abs(keyboardGraph.nodes[0].x - originalX - 5f) < .01f, "方向键移动逻辑未移动选中节点");
+                    keyboardCanvas.SelectNearestInDirectionForTesting(1, 0);
+                    Require(keyboardCanvas.SelectedType == "node" && keyboardCanvas.SelectedId == "keyboard_right", "Alt+方向键未选择对应方向的相邻对象");
+                    Require(keyboardCanvas.BeginSelectedLabelEdit() && keyboardCanvas.InlineEditorActiveForTesting, "Enter/F2 名称编辑入口不可用");
+                    keyboardCanvas.SetInlineEditorTextForTesting("键盘改名"); keyboardCanvas.CommitInlineEditForTesting();
+                    Require(keyboardGraph.nodes[1].label == "键盘改名", "键盘名称编辑未提交");
+                    AccessibleObject canvasAccessibility = keyboardCanvas.AccessibilityObject;
+                    Require(canvasAccessibility != null && canvasAccessibility.GetChildCount() == keyboardGraph.nodes.Count, "画布无障碍对象树未暴露全部节点");
+                    AccessibleObject firstAccessibleNode = canvasAccessibility.GetChild(0);
+                    Require(firstAccessibleNode != null && firstAccessibleNode.Name.Contains("节点") && firstAccessibleNode.Description.Contains("类型"), "画布节点缺少可读的无障碍名称或说明");
+                    System.Drawing.Rectangle map = keyboardCanvas.MiniMapBoundsForTesting; System.Drawing.Point mapTarget = new System.Drawing.Point(map.Right - 12, map.Top + map.Height / 2);
+                    System.Drawing.PointF viewBeforeMap = keyboardCanvas.ViewOffset;
+                    Require(keyboardCanvas.NavigateMiniMapForTesting(mapTarget), "小地图未响应导航位置");
+                    Require(Math.Abs(keyboardCanvas.ViewOffset.X - viewBeforeMap.X) > .01f || Math.Abs(keyboardCanvas.ViewOffset.Y - viewBeforeMap.Y) > .01f, "小地图导航未改变视野");
+                }
+
+                GraphDocument accessibleFlowGraph = GraphSerialization.CreateBlank("流程图组件无障碍测试"); accessibleFlowGraph.meta.diagramType = "flowchart";
+                using (MainForm accessibleFlowWindow = new MainForm(accessibleFlowGraph, false))
+                {
+                    accessibleFlowWindow.WindowState = FormWindowState.Normal; accessibleFlowWindow.Size = new System.Drawing.Size(1200, 760); accessibleFlowWindow.CreateControl(); accessibleFlowWindow.PerformLayout();
+                    Require(accessibleFlowWindow.ToolbarAccessibleForTesting, "工具栏组合框缺少无障碍名称");
+                    Require(accessibleFlowWindow.FlowchartPaletteAccessibleForTesting, "流程图组件按钮缺少可读名称或键盘焦点");
+                    Require(accessibleFlowWindow.AddFlowchartShapeUsingKeyboardForTesting("decision") && accessibleFlowGraph.nodes.Count == 1 && accessibleFlowGraph.nodes[0].shape == "decision", "流程图组件按钮无法通过键盘点击添加图形");
+                }
+
+                GraphDocument swapDirectionGraph = GraphSerialization.CreateBlank("关系方向交换测试");
+                swapDirectionGraph.nodes.Add(new GraphNode { id = "swap_a", label = "A", type = "步骤", kind = "system", group = "", x = 40, y = 40, w = 150, h = 54, note = "" });
+                swapDirectionGraph.nodes.Add(new GraphNode { id = "swap_b", label = "B", type = "步骤", kind = "resource", group = "", x = 320, y = 40, w = 150, h = 54, note = "" });
+                swapDirectionGraph.edges.Add(new GraphEdge { id = "swap_edge", source = "swap_a", target = "swap_b", sourceType = "node", targetType = "node", label = "交换", category = "core", lineType = "polyline" });
+                swapDirectionGraph = GraphSerialization.Normalize(swapDirectionGraph);
+                using (MainForm swapWindow = new MainForm(swapDirectionGraph, false))
+                {
+                    swapWindow.WindowState = FormWindowState.Normal; swapWindow.Size = new System.Drawing.Size(1200, 760); swapWindow.CreateControl(); swapWindow.PerformLayout();
+                    swapWindow.CanvasForTesting.SelectEntity("edge", "swap_edge");
+                    Require(swapWindow.SwapSelectedEdgeDirectionForTesting(), "关系方向一键交换操作失败");
+                    Require(swapDirectionGraph.edges[0].source == "swap_b" && swapDirectionGraph.edges[0].target == "swap_a", "关系方向交换未更新起点和终点");
+                    Require(swapWindow.CanvasForTesting.EdgeSourceColorForTesting(swapDirectionGraph.edges[0]).ToArgb() == System.Drawing.Color.FromArgb(75, 158, 234).ToArgb(), "关系方向交换后线色未跟随新起点");
+                    swapWindow.UndoForTesting();
+                    Require(swapWindow.CanvasForTesting.Document.edges[0].source == "swap_a" && swapWindow.CanvasForTesting.Document.edges[0].target == "swap_b", "关系方向交换无法撤销");
+                    swapWindow.RedoForTesting();
+                    Require(swapWindow.CanvasForTesting.Document.edges[0].source == "swap_b" && swapWindow.CanvasForTesting.Document.edges[0].target == "swap_a", "关系方向交换无法重做");
+                }
+
+                GraphDocument duplicateReverseGraph = GraphSerialization.Clone(swapDirectionGraph);
+                duplicateReverseGraph.edges.Add(new GraphEdge { id = "opposite_edge", source = "swap_a", target = "swap_b", sourceType = "node", targetType = "node", label = "反向已存在", category = "core", lineType = "auto" });
+                duplicateReverseGraph = GraphSerialization.Normalize(duplicateReverseGraph);
+                using (MainForm duplicateReverseWindow = new MainForm(duplicateReverseGraph, false))
+                {
+                    duplicateReverseWindow.CanvasForTesting.SelectEntity("edge", "swap_edge");
+                    Require(!duplicateReverseWindow.SwapSelectedEdgeDirectionForTesting(), "存在反向关系时仍错误交换方向");
+                }
+
                 GraphDocument maximumGraph = GraphSerialization.CreateBlank("maximum graph smoke test");
                 for (int nodeIndex = 0; nodeIndex < GraphSerialization.MaxNodes; nodeIndex++)
                     maximumGraph.nodes.Add(new GraphNode { id = "max_node_" + nodeIndex, label = "N" + nodeIndex, type = "test", kind = "system", group = "", x = (nodeIndex % 50) * 220f, y = (nodeIndex / 50) * 110f, w = 150, h = 55 });
@@ -691,7 +1170,7 @@ namespace RelationshipGraphNative
                 Require(!MainForm.ShouldDeleteSelectionForTesting(Keys.Back, false), "Backspace 仍会删除节点");
                 Require(!MainForm.ShouldDeleteSelectionForTesting(Keys.Delete, true), "文字输入时 Delete 仍会删除节点");
                 Require(MainForm.ShouldDeleteSelectionForTesting(Keys.Delete, false), "画布 Delete 删除功能失效");
-                File.WriteAllText(reportPath, "{\"ok\":true,\"version\":\"4.5.1\",\"groups\":4,\"nodes\":12,\"edges\":12,\"runtime\":\"native-winforms\"}", new UTF8Encoding(false));
+                File.WriteAllText(reportPath, "{\"ok\":true,\"version\":\"5.0.0\",\"groups\":4,\"nodes\":12,\"edges\":12,\"runtime\":\"native-winforms\"}", new UTF8Encoding(false));
                 return 0;
             }
             catch (Exception error)
@@ -711,6 +1190,86 @@ namespace RelationshipGraphNative
                 try { if (tempFolder.Length > 0 && Directory.Exists(tempFolder)) Directory.Delete(tempFolder, true); }
                 catch { }
             }
+        }
+
+        private static bool LayoutResultsMatch(GraphLayoutResult first, GraphLayoutResult second)
+        {
+            if (first == null || second == null || first.NodeBounds.Count != second.NodeBounds.Count || first.GroupBounds.Count != second.GroupBounds.Count || first.Edges.Count != second.Edges.Count) return false;
+            foreach (KeyValuePair<string, RectangleF> pair in first.NodeBounds)
+            {
+                RectangleF other;
+                if (!second.NodeBounds.TryGetValue(pair.Key, out other) || !RectanglesClose(pair.Value, other)) return false;
+            }
+            foreach (KeyValuePair<string, RectangleF> pair in first.GroupBounds)
+            {
+                RectangleF other;
+                if (!second.GroupBounds.TryGetValue(pair.Key, out other) || !RectanglesClose(pair.Value, other)) return false;
+            }
+            foreach (KeyValuePair<string, GraphEdgeLayout> pair in first.Edges)
+            {
+                GraphEdgeLayout other;
+                GraphEdgeLayout route = pair.Value;
+                if (!second.Edges.TryGetValue(pair.Key, out other) || route.SourceSide != other.SourceSide || route.TargetSide != other.TargetSide ||
+                    !PointsClose(route.SourcePoint, other.SourcePoint) || !PointsClose(route.TargetPoint, other.TargetPoint) ||
+                    !RectanglesClose(route.LabelBounds, other.LabelBounds) || route.Points.Count != other.Points.Count) return false;
+                for (int index = 0; index < route.Points.Count; index++) if (!PointsClose(route.Points[index], other.Points[index])) return false;
+            }
+            return true;
+        }
+
+        private static bool RectanglesClose(RectangleF first, RectangleF second)
+        {
+            return Math.Abs(first.X - second.X) < .01f && Math.Abs(first.Y - second.Y) < .01f && Math.Abs(first.Width - second.Width) < .01f && Math.Abs(first.Height - second.Height) < .01f;
+        }
+
+        private static bool PointsClose(PointF first, PointF second)
+        {
+            return Math.Abs(first.X - second.X) < .01f && Math.Abs(first.Y - second.Y) < .01f;
+        }
+
+        private static bool RectangleMatchesNode(RectangleF bounds, GraphNode node)
+        {
+            return bounds.X == node.x && bounds.Y == node.y && bounds.Width == node.w && bounds.Height == node.h;
+        }
+
+        private static bool RectangleMatchesGroup(RectangleF bounds, GraphGroup group)
+        {
+            return bounds.X == group.x && bounds.Y == group.y && bounds.Width == group.w && bounds.Height == group.h;
+        }
+
+        private static bool RouteIsOrthogonal(IList<PointF> points)
+        {
+            if (points == null || points.Count < 2) return false;
+            for (int index = 1; index < points.Count; index++)
+                if (Math.Abs(points[index - 1].X - points[index].X) >= .01f && Math.Abs(points[index - 1].Y - points[index].Y) >= .01f) return false;
+            return true;
+        }
+
+        private static bool RouteCrossesRectangleInterior(IList<PointF> points, RectangleF bounds)
+        {
+            if (points == null) return false;
+            for (int index = 1; index < points.Count; index++)
+            {
+                PointF first = points[index - 1], second = points[index];
+                if (Math.Abs(first.Y - second.Y) < .01f)
+                {
+                    float y = first.Y, left = Math.Min(first.X, second.X), right = Math.Max(first.X, second.X);
+                    if (y > bounds.Top + .01f && y < bounds.Bottom - .01f && right > bounds.Left + .01f && left < bounds.Right - .01f) return true;
+                }
+                else if (Math.Abs(first.X - second.X) < .01f)
+                {
+                    float x = first.X, top = Math.Min(first.Y, second.Y), bottom = Math.Max(first.Y, second.Y);
+                    if (x > bounds.Left + .01f && x < bounds.Right - .01f && bottom > bounds.Top + .01f && top < bounds.Bottom - .01f) return true;
+                }
+                else return true;
+            }
+            return false;
+        }
+
+        private static bool FinitePositiveRectangle(RectangleF bounds)
+        {
+            return !Single.IsNaN(bounds.X) && !Single.IsInfinity(bounds.X) && !Single.IsNaN(bounds.Y) && !Single.IsInfinity(bounds.Y) &&
+                !Single.IsNaN(bounds.Width) && !Single.IsInfinity(bounds.Width) && !Single.IsNaN(bounds.Height) && !Single.IsInfinity(bounds.Height) && bounds.Width > 0 && bounds.Height > 0;
         }
 
         private static void Require(bool condition, string message)

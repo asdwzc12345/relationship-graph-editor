@@ -22,6 +22,18 @@ namespace RelationshipGraphNative
                 NativePersistence.WriteStreamAtomic(fileName, false, delegate(Stream stream) { bitmap.Save(stream, ImageFormat.Png); });
         }
 
+        public static void SavePng(GraphDocument graph, bool darkTheme, string fileName)
+        {
+            using (GraphCanvas canvas = new GraphCanvas())
+            {
+                canvas.Size = new Size(1200, 800);
+                canvas.Document = GraphSerialization.CreateImmutableSnapshot(graph);
+                canvas.DarkTheme = darkTheme;
+                canvas.SetAutomaticRouting(GraphLayout.CalculateRoutes(canvas.Document, GraphLayoutOptions.ForDocument(canvas.Document)));
+                SavePng(canvas, fileName);
+            }
+        }
+
         public static void SaveSvg(GraphDocument graph, string fileName)
         {
             NativePersistence.WriteAllTextAtomic(fileName, BuildSvg(graph), new UTF8Encoding(false), false);
@@ -157,6 +169,12 @@ applyTheme();setView();
             NativePersistence.WriteStreamAtomic(fileName, false, delegate(Stream stream) { NativePdfExport.Write(canvas.Document, stream); });
         }
 
+        public static void SavePdf(GraphDocument graph, string fileName)
+        {
+            if (graph == null) throw new InvalidOperationException("没有可导出的关系图。");
+            NativePersistence.WriteStreamAtomic(fileName, false, delegate(Stream stream) { NativePdfExport.Write(graph, stream); });
+        }
+
         public static string BuildDrawio(GraphDocument graph)
         {
             graph = GraphSerialization.Normalize(GraphSerialization.Clone(graph));
@@ -167,7 +185,9 @@ applyTheme();setView();
             StringBuilder xml = new StringBuilder(32768);
             xml.Append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<mxfile host=\"app.diagrams.net\" modified=\"").Append(Xml(DateTime.UtcNow.ToString("o")))
                 .Append("\" agent=\"Relationship Graph Editor\" version=\"24.7.17\" type=\"device\"><diagram id=\"relationship-graph\" name=\"").Append(Xml(graph.meta.title)).Append("\">");
-            xml.Append("<mxGraphModel dx=\"1200\" dy=\"800\" grid=\"1\" gridSize=\"10\" guides=\"1\" tooltips=\"1\" connect=\"1\" arrows=\"1\" fold=\"1\" page=\"0\" pageScale=\"1\" pageWidth=\"1169\" pageHeight=\"827\" math=\"0\" shadow=\"0\"><root><mxCell id=\"0\"/><mxCell id=\"1\" parent=\"0\"/>");
+            xml.Append("<mxGraphModel dx=\"1200\" dy=\"800\" grid=\"1\" gridSize=\"10\" guides=\"1\" tooltips=\"1\" connect=\"1\" arrows=\"1\" fold=\"1\" page=\"0\" pageScale=\"1\" pageWidth=\"1169\" pageHeight=\"827\" math=\"0\" shadow=\"0\" rgFormat=\"relationship-graph-v1\" rgShiftX=\"").Append(Number(shiftX))
+                .Append("\" rgShiftY=\"").Append(Number(shiftY)).Append("\" rgCanvasWidth=\"").Append(Number(graph.meta.canvasWidth))
+                .Append("\" rgCanvasHeight=\"").Append(Number(graph.meta.canvasHeight)).Append("\" rgDiagramType=\"").Append(Xml(graph.meta.diagramType)).Append("\"><root><mxCell id=\"0\"/><mxCell id=\"1\" parent=\"0\"/>");
 
             foreach (GraphGroup group in graph.groups.OrderByDescending(delegate(GraphGroup item) { return item.w * item.h; }))
             {
@@ -177,7 +197,7 @@ applyTheme();setView();
                 string parent = nested ? MxId("group", parentGroup.id) : "1";
                 float x = nested ? group.x - parentGroup.x : group.x + shiftX;
                 float y = nested ? group.y - parentGroup.y : group.y + shiftY;
-                xml.Append("<mxCell id=\"").Append(Xml(MxId("group", group.id))).Append("\" value=\"").Append(Xml(group.label))
+                xml.Append("<mxCell id=\"").Append(Xml(MxId("group", group.id))).Append("\" rgEntity=\"group\" rgId=\"").Append(Xml(group.id)).Append("\" value=\"").Append(Xml(group.label))
                     .Append("\" style=\"swimlane;horizontal=1;startSize=32;rounded=1;html=1;whiteSpace=wrap;container=1;collapsible=0;recursiveResize=0;fillColor=#f4f7fa;swimlaneFillColor=#ffffff;strokeColor=#9ba6b2;dashed=1;dashPattern=7 5;fontColor=#2d3946;fontStyle=1;locked=0;\" vertex=\"1\" connectable=\"1\" parent=\"").Append(Xml(parent)).Append("\"><mxGeometry x=\"")
                     .Append(Number(x)).Append("\" y=\"").Append(Number(y)).Append("\" width=\"").Append(Number(group.w)).Append("\" height=\"").Append(Number(group.h)).Append("\" as=\"geometry\"/></mxCell>");
             }
@@ -190,8 +210,10 @@ applyTheme();setView();
                 float x = grouped ? node.x - parentGroup.x : node.x + shiftX;
                 float y = grouped ? node.y - parentGroup.y : node.y + shiftY;
                 string value = "<font style=\"font-size:10px;color:#425064\">" + Xml(node.type) + "</font><br><b>" + Xml(node.label) + "</b>";
-                xml.Append("<mxCell id=\"").Append(Xml(MxId("node", node.id))).Append("\" value=\"").Append(Xml(value))
-                    .Append("\" style=\"rounded=1;arcSize=16;whiteSpace=wrap;html=1;align=center;verticalAlign=middle;spacing=6;fillColor=").Append(NodeColor(node.kind))
+                xml.Append("<mxCell id=\"").Append(Xml(MxId("node", node.id))).Append("\" rgEntity=\"node\" rgId=\"").Append(Xml(node.id))
+                    .Append("\" rgType=\"").Append(Xml(node.type)).Append("\" rgKind=\"").Append(Xml(node.kind)).Append("\" rgShape=\"").Append(Xml(node.shape))
+                    .Append("\" rgNote=\"").Append(Xml(node.note)).Append("\" value=\"").Append(Xml(value))
+                    .Append("\" style=\"").Append(DrawioNodeShapeStyle(node.shape)).Append("whiteSpace=wrap;html=1;align=center;verticalAlign=middle;spacing=6;fillColor=").Append(NodeColor(node.kind))
                     .Append(";strokeColor=#697785;strokeWidth=1.4;fontColor=#17202b;locked=0;\" vertex=\"1\" connectable=\"1\" parent=\"").Append(Xml(parent)).Append("\"><mxGeometry x=\"")
                     .Append(Number(x)).Append("\" y=\"").Append(Number(y)).Append("\" width=\"").Append(Number(node.w)).Append("\" height=\"").Append(Number(node.h)).Append("\" as=\"geometry\"/></mxCell>");
             }
@@ -202,8 +224,10 @@ applyTheme();setView();
                 if (!TryRect(edge.sourceType, edge.source, nodes, groups, out sourceRect) || !TryRect(edge.targetType, edge.target, nodes, groups, out targetRect)) continue;
                 string sourceSide = String.IsNullOrEmpty(edge.sourceSide) ? ConnectionSide(sourceRect, targetRect) : edge.sourceSide;
                 string targetSide = String.IsNullOrEmpty(edge.targetSide) ? ConnectionSide(targetRect, sourceRect) : edge.targetSide;
-                string lineStyle = edge.lineType == "straight" ? "edgeStyle=none;noEdgeStyle=1;" : edge.lineType == "polyline" ? "edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;" : "edgeStyle=none;curved=1;rounded=1;";
-                xml.Append("<mxCell id=\"").Append(Xml(MxId("edge", edge.id))).Append("\" value=\"").Append(Xml(edge.label))
+                string lineStyle = edge.lineType == "straight" ? "edgeStyle=none;noEdgeStyle=1;" : edge.lineType == "polyline" || edge.lineType == "auto" ? "edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;" : "edgeStyle=none;curved=1;rounded=1;";
+                xml.Append("<mxCell id=\"").Append(Xml(MxId("edge", edge.id))).Append("\" rgEntity=\"edge\" rgId=\"").Append(Xml(edge.id))
+                    .Append("\" rgCategory=\"").Append(Xml(edge.category)).Append("\" rgLineType=\"").Append(Xml(edge.lineType))
+                    .Append("\" rgSourceSide=\"").Append(Xml(sourceSide)).Append("\" rgTargetSide=\"").Append(Xml(targetSide)).Append("\" value=\"").Append(Xml(edge.label))
                     .Append("\" style=\"").Append(lineStyle).Append("html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=").Append(SourceAccentColor(edge, nodes)).Append(';')
                     .Append(DrawioPortStyle("exit", sourceSide)).Append(DrawioPortStyle("entry", targetSide)).Append("locked=0;\" edge=\"1\" parent=\"1\" source=\"")
                     .Append(Xml(MxId(edge.sourceType, edge.source))).Append("\" target=\"").Append(Xml(MxId(edge.targetType, edge.target))).Append("\"><mxGeometry relative=\"1\" as=\"geometry\"/></mxCell>");
@@ -224,12 +248,30 @@ applyTheme();setView();
             return prefix + "X=" + Number(x) + ";" + prefix + "Y=" + Number(y) + ";" + prefix + "Dx=0;" + prefix + "Dy=0;" + prefix + "Perimeter=1;";
         }
 
+        private static string DrawioNodeShapeStyle(string shape)
+        {
+            switch (GraphSerialization.NormalizeNodeShape(shape))
+            {
+                case "terminator": return "rounded=1;arcSize=50;";
+                case "decision": return "rhombus;";
+                case "data": return "shape=parallelogram;perimeter=parallelogramPerimeter;fixedSize=1;";
+                case "document": return "shape=document;boundedLbl=1;";
+                default: return "rounded=1;arcSize=16;";
+            }
+        }
+
         public static string BuildSvg(GraphDocument graph)
         {
             graph = GraphSerialization.Normalize(GraphSerialization.Clone(graph));
             Dictionary<string, GraphNode> nodes = graph.nodes.ToDictionary(delegate(GraphNode item) { return item.id; }, StringComparer.Ordinal);
             Dictionary<string, GraphGroup> groups = graph.groups.ToDictionary(delegate(GraphGroup item) { return item.id; }, StringComparer.Ordinal);
             RectangleF bounds = ExportBounds(graph, nodes, groups);
+            GraphLayoutResult routing = GraphLayout.CalculateRoutes(graph, GraphLayoutOptions.ForDocument(graph));
+            if (routing != null && routing.ContentBounds.Width > 0 && routing.ContentBounds.Height > 0)
+            {
+                RectangleF routedBounds = routing.ContentBounds; routedBounds.Inflate(36f, 36f);
+                bounds = RectangleF.Union(bounds, routedBounds);
+            }
             StringBuilder svg = new StringBuilder(32768);
             svg.Append("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"").Append(Number(bounds.Width)).Append("\" height=\"").Append(Number(bounds.Height))
                 .Append("\" viewBox=\"").Append(Number(bounds.X)).Append(' ').Append(Number(bounds.Y)).Append(' ').Append(Number(bounds.Width)).Append(' ').Append(Number(bounds.Height)).Append("\" role=\"img\" aria-label=\"").Append(Xml(graph.meta.title)).Append("\">");
@@ -259,14 +301,17 @@ applyTheme();setView();
                 PointF source = Port(sourceRect, sourceSide), target = Port(targetRect, targetSide);
                 string color = SourceAccentColor(edge, nodes), markerId;
                 if (!markerIds.TryGetValue(edge.id, out markerId)) markerId = "arrow-edge-0";
-                string path = EdgePath(edge.lineType, sourceSide, targetSide, source, target);
+                GraphEdgeLayout routedEdge = null;
+                bool hasRoute = edge.lineType == "auto" && routing != null && routing.TryGetEdge(edge.id, out routedEdge) && routedEdge != null && routedEdge.Points.Count >= 2;
+                string path = hasRoute ? SvgPolylinePath(routedEdge.Points) : EdgePath(edge.lineType, sourceSide, targetSide, source, target);
                 svg.Append("<g data-type=\"edge\" data-id=\"").Append(Xml(edge.id)).Append("\"><path d=\"").Append(path).Append("\" fill=\"none\" stroke=\"").Append(color).Append("\" stroke-width=\"2\" stroke-linecap=\"round\" marker-end=\"url(#").Append(markerId).Append(")\"/>");
                 if (!String.IsNullOrWhiteSpace(edge.label))
                 {
-                    PointF labelPoint = EdgePathMidpoint(edge.lineType, sourceSide, targetSide, source, target);
-                    float x = labelPoint.X, y = labelPoint.Y;
-                    float width = Math.Max(44, edge.label.Length * 14 + 14);
-                    svg.Append("<rect x=\"").Append(Number(x - width / 2)).Append("\" y=\"").Append(Number(y - 13)).Append("\" width=\"").Append(Number(width)).Append("\" height=\"25\" rx=\"7\" fill=\"#fff\" stroke=\"#d9e0e7\"/><text x=\"").Append(Number(x)).Append("\" y=\"").Append(Number(y + 5)).Append("\" text-anchor=\"middle\" font-size=\"12\" fill=\"#384657\">").Append(Xml(edge.label)).Append("</text>");
+                    PointF labelPoint = hasRoute ? routedEdge.LabelPoint : EdgePathMidpoint(edge.lineType, sourceSide, targetSide, source, target);
+                    RectangleF labelBox = hasRoute && !routedEdge.LabelBounds.IsEmpty
+                        ? routedEdge.LabelBounds
+                        : new RectangleF(labelPoint.X - Math.Max(44, edge.label.Length * 14 + 14) / 2f, labelPoint.Y - 13, Math.Max(44, edge.label.Length * 14 + 14), 26f);
+                    svg.Append("<rect x=\"").Append(Number(labelBox.X)).Append("\" y=\"").Append(Number(labelBox.Y)).Append("\" width=\"").Append(Number(labelBox.Width)).Append("\" height=\"").Append(Number(labelBox.Height)).Append("\" rx=\"7\" fill=\"#fff\" stroke=\"#d9e0e7\"/><text x=\"").Append(Number(labelBox.X + labelBox.Width / 2f)).Append("\" y=\"").Append(Number(labelBox.Y + labelBox.Height / 2f + 5)).Append("\" text-anchor=\"middle\" font-size=\"12\" fill=\"#384657\">").Append(Xml(edge.label)).Append("</text>");
                 }
                 svg.Append("</g>");
             }
@@ -274,12 +319,55 @@ applyTheme();setView();
             foreach (GraphNode node in graph.nodes)
             {
                 string color = NodeColor(node.kind);
-                svg.Append("<g data-type=\"node\" data-id=\"").Append(Xml(node.id)).Append("\" data-kind=\"").Append(Xml(node.kind)).Append("\"><rect x=\"").Append(Number(node.x)).Append("\" y=\"").Append(Number(node.y)).Append("\" width=\"").Append(Number(node.w)).Append("\" height=\"").Append(Number(node.h)).Append("\" rx=\"9\" fill=\"").Append(color).Append("\" stroke=\"#697785\" stroke-width=\"1.4\"/>");
-                svg.Append("<text x=\"").Append(Number(node.x + 9)).Append("\" y=\"").Append(Number(node.y + 17)).Append("\" font-size=\"10\" fill=\"#425064\">").Append(Xml(node.type)).Append("</text>");
-                svg.Append("<text x=\"").Append(Number(node.x + node.w / 2)).Append("\" y=\"").Append(Number(node.y + node.h / 2 + 10)).Append("\" text-anchor=\"middle\" font-size=\"14\" font-weight=\"600\" fill=\"#17202b\">").Append(Xml(node.label)).Append("</text></g>");
+                bool flowchart = graph.meta != null && graph.meta.diagramType == "flowchart";
+                svg.Append("<g data-type=\"node\" data-id=\"").Append(Xml(node.id)).Append("\" data-kind=\"").Append(Xml(node.kind)).Append("\" data-shape=\"").Append(Xml(node.shape)).Append("\">");
+                AppendSvgNodeShape(svg, node, color);
+                if (!flowchart) svg.Append("<text x=\"").Append(Number(node.x + 9)).Append("\" y=\"").Append(Number(node.y + 17)).Append("\" font-size=\"10\" fill=\"#425064\">").Append(Xml(node.type)).Append("</text>");
+                svg.Append("<text x=\"").Append(Number(node.x + node.w / 2)).Append("\" y=\"").Append(Number(node.y + node.h / 2 + (flowchart ? 5 : 10))).Append("\" text-anchor=\"middle\" font-size=\"14\" font-weight=\"600\" fill=\"#17202b\">").Append(Xml(node.label)).Append("</text></g>");
             }
             svg.Append("</svg>");
             return svg.ToString();
+        }
+
+        private static string SvgPolylinePath(IList<PointF> points)
+        {
+            if (points == null || points.Count < 2) return "";
+            StringBuilder path = new StringBuilder();
+            path.Append("M ").Append(Number(points[0].X)).Append(' ').Append(Number(points[0].Y));
+            for (int index = 1; index < points.Count; index++) path.Append(" L ").Append(Number(points[index].X)).Append(' ').Append(Number(points[index].Y));
+            return path.ToString();
+        }
+
+        private static void AppendSvgNodeShape(StringBuilder svg, GraphNode node, string color)
+        {
+            string style = " fill=\"" + color + "\" stroke=\"#697785\" stroke-width=\"1.4\"";
+            string shape = GraphSerialization.NormalizeNodeShape(node.shape);
+            if (shape == "decision")
+            {
+                svg.Append("<polygon points=\"").Append(Number(node.x + node.w / 2)).Append(',').Append(Number(node.y)).Append(' ')
+                    .Append(Number(node.x + node.w)).Append(',').Append(Number(node.y + node.h / 2)).Append(' ')
+                    .Append(Number(node.x + node.w / 2)).Append(',').Append(Number(node.y + node.h)).Append(' ')
+                    .Append(Number(node.x)).Append(',').Append(Number(node.y + node.h / 2)).Append("\"").Append(style).Append("/>");
+            }
+            else if (shape == "data")
+            {
+                float inset = Math.Min(18f, node.w / 6f);
+                svg.Append("<polygon points=\"").Append(Number(node.x + inset)).Append(',').Append(Number(node.y)).Append(' ')
+                    .Append(Number(node.x + node.w)).Append(',').Append(Number(node.y)).Append(' ')
+                    .Append(Number(node.x + node.w - inset)).Append(',').Append(Number(node.y + node.h)).Append(' ')
+                    .Append(Number(node.x)).Append(',').Append(Number(node.y + node.h)).Append("\"").Append(style).Append("/>");
+            }
+            else if (shape == "document")
+            {
+                svg.Append("<path d=\"M ").Append(Number(node.x)).Append(' ').Append(Number(node.y)).Append(" L ").Append(Number(node.x + node.w)).Append(' ').Append(Number(node.y))
+                    .Append(" L ").Append(Number(node.x + node.w)).Append(' ').Append(Number(node.y + node.h - 8)).Append(" L ").Append(Number(node.x + node.w * .75f)).Append(' ').Append(Number(node.y + node.h))
+                    .Append(" L ").Append(Number(node.x + node.w * .25f)).Append(' ').Append(Number(node.y + node.h - 8)).Append(" L ").Append(Number(node.x)).Append(' ').Append(Number(node.y + node.h)).Append(" Z\"").Append(style).Append("/>");
+            }
+            else
+            {
+                float radius = shape == "terminator" ? node.h / 2f : 9f;
+                svg.Append("<rect x=\"").Append(Number(node.x)).Append("\" y=\"").Append(Number(node.y)).Append("\" width=\"").Append(Number(node.w)).Append("\" height=\"").Append(Number(node.h)).Append("\" rx=\"").Append(Number(radius)).Append("\"").Append(style).Append("/>");
+            }
         }
 
         private static RectangleF ExportBounds(GraphDocument graph, Dictionary<string, GraphNode> nodes, Dictionary<string, GraphGroup> groups)
@@ -297,7 +385,7 @@ applyTheme();setView();
                 PointF source = Port(sourceRect, sourceSide), target = Port(targetRect, targetSide);
                 IncludePoint(ref hasContent, ref minX, ref minY, ref maxX, ref maxY, source);
                 IncludePoint(ref hasContent, ref minX, ref minY, ref maxX, ref maxY, target);
-                if (edge.lineType == "polyline")
+                if (edge.lineType == "polyline" || edge.lineType == "auto")
                 {
                     if (sourceSide == "left" || sourceSide == "right")
                     {
@@ -355,7 +443,7 @@ applyTheme();setView();
         private static string EdgePath(string lineType, string sourceSide, string targetSide, PointF source, PointF target)
         {
             if (lineType == "straight") return "M " + Number(source.X) + " " + Number(source.Y) + " L " + Number(target.X) + " " + Number(target.Y);
-            if (lineType == "polyline")
+            if (lineType == "polyline" || lineType == "auto")
             {
                 if (sourceSide == "left" || sourceSide == "right")
                 {
@@ -374,7 +462,7 @@ applyTheme();setView();
         {
             List<PointF> points = new List<PointF>(); points.Add(source);
             if (lineType == "straight") points.Add(target);
-            else if (lineType == "polyline")
+            else if (lineType == "polyline" || lineType == "auto")
             {
                 if (sourceSide == "left" || sourceSide == "right")
                 {
@@ -452,7 +540,11 @@ applyTheme();setView();
         private static PointF Center(RectangleF rect) { return new PointF(rect.X + rect.Width / 2, rect.Y + rect.Height / 2); }
         private static float Distance(PointF a, PointF b) { float x = a.X - b.X, y = a.Y - b.Y; return (float)Math.Sqrt(x * x + y * y); }
         private static string Number(float value) { return value.ToString("0.###", CultureInfo.InvariantCulture); }
-        private static string Xml(string value) { return System.Security.SecurityElement.Escape(value ?? "") ?? ""; }
+        private static string Xml(string value)
+        {
+            string escaped = System.Security.SecurityElement.Escape(value ?? "") ?? "";
+            return escaped.Replace("\r", "&#13;").Replace("\n", "&#10;").Replace("\t", "&#9;");
+        }
         private static string NodeColor(string kind)
         {
             if (kind == "resource") return "#dcecff"; if (kind == "output") return "#dff3e7"; if (kind == "content") return "#f6e2ef";

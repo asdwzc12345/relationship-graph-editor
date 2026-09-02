@@ -22,6 +22,11 @@ namespace RelationshipGraphNative
 
         public static void WriteStreamAtomic(string fileName, bool keepBackup, Action<Stream> writer)
         {
+            WriteStreamAtomic(fileName, keepBackup, writer, null);
+        }
+
+        public static void WriteStreamAtomic(string fileName, bool keepBackup, Action<Stream> writer, Action beforePublish)
+        {
             if (String.IsNullOrWhiteSpace(fileName)) throw new ArgumentException("文件路径不能为空。", "fileName");
             if (writer == null) throw new ArgumentNullException("writer");
 
@@ -34,6 +39,7 @@ namespace RelationshipGraphNative
             try
             {
                 WriteNewFile(temporaryPath, writer);
+                if (beforePublish != null) beforePublish();
                 if (keepBackup && File.Exists(targetPath)) CopyFileAtomically(targetPath, targetPath + ".bak");
                 PublishTemporaryFile(temporaryPath, targetPath);
                 temporaryPath = null;
