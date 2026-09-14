@@ -214,7 +214,7 @@ assert.match(mainFormText, /DocumentFingerprint/);
 assert.match(mainFormText, /FinishPendingCanvasWork/);
 assert.match(mainFormText, /ClearAutosaveSafely/);
 assert.match(mainFormText, /preferredInspector = Math\.Max\(440, Math\.Min\(560/);
-assert.match(mainFormText, /_themeBox\.Width = 128/);
+assert.match(mainFormText, /SizeFiveCharacterCombo\(_themeBox\)/);
 assert.match(mainFormText, /MeasureInspectorTextHeight/);
 assert.match(mainFormText, /type = "节点类型"/);
 assert.doesNotMatch(mainFormText, /type = "工作步骤"/);

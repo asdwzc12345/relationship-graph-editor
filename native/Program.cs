@@ -1088,15 +1088,13 @@ namespace RelationshipGraphNative
                     for (int secondIndex = firstIndex + 1; secondIndex < automaticNodeBounds.Count; secondIndex++)
                         Require(!automaticNodeBounds[firstIndex].IntersectsWith(automaticNodeBounds[secondIndex]), "自动排版后节点仍相互重叠");
 
-                List<PointF> fanOutPorts = new List<PointF>();
                 foreach (string edgeId in new[] { "layout_ab", "layout_ac", "layout_ad", "layout_ae" })
                 {
                     GraphEdgeLayout route;
                     Require(automaticLayout.TryGetEdge(edgeId, out route), "自动路由遗漏同源关系：" + edgeId);
                     Require(route.SourceSide == "right", "从左到右排版未从起点右侧出线：" + edgeId);
-                    for (int portIndex = 0; portIndex < fanOutPorts.Count; portIndex++)
-                        Require(PointsClose(fanOutPorts[portIndex], route.SourcePoint), "同源分支没有共用中心出线点");
-                    fanOutPorts.Add(route.SourcePoint);
+                    RectangleF sourceBounds = automaticLayout.NodeBounds["layout_a"];
+                    Require(Math.Abs(route.SourcePoint.X - sourceBounds.Right) < .01f && route.SourcePoint.Y > sourceBounds.Top && route.SourcePoint.Y < sourceBounds.Bottom, "避让出线点未留在起点边界内");
                 }
 
                 List<RectangleF> labelBounds = new List<RectangleF>();
@@ -1198,14 +1196,14 @@ namespace RelationshipGraphNative
                     separateOrigins = GraphSerialization.Normalize(separateOrigins);
                     GraphLayoutResult separated = GraphLayout.CalculateRoutes(separateOrigins);
                     Require(separated.Edges["daily_money"].Points.Count == 2, "分离其他来源后破坏同高直连");
-                    Require(!PointsClose(separated.Edges["once_money"].TargetPoint, separated.Edges["daily_money"].TargetPoint), "不同来源仍共用目标入口");
+                    Require(PointsClose(separated.Edges["once_money"].TargetPoint, separated.Edges["daily_money"].TargetPoint), "同目标分支未汇入直线入口");
                     foreach (GraphEdge firstEdge in separateOrigins.edges)
                     {
                         GraphEdgeLayout firstRoute = separated.Edges[firstEdge.id];
                         Require(!firstRoute.HasObstacleConflict && RouteIsOrthogonal(firstRoute.Points), "来源分离破坏避障或正交路径");
                         foreach (GraphEdge secondEdge in separateOrigins.edges)
                         {
-                            if (firstEdge.source == secondEdge.source) continue;
+                            if (firstEdge.source == secondEdge.source || firstEdge.target == secondEdge.target) continue;
                             GraphEdgeLayout secondRoute = separated.Edges[secondEdge.id];
                             for (int i = 1; i < firstRoute.Points.Count; i++)
                                 for (int j = 1; j < secondRoute.Points.Count; j++)
@@ -1249,6 +1247,82 @@ namespace RelationshipGraphNative
                         Require(!crossingRoute.HasObstacleConflict && RouteIsOrthogonal(crossingRoute.Points), "减少交叉破坏了避障路线");
                         foreach (GraphNode crossingNode in crossingGraph.nodes)
                             Require(!RouteCrossesRectangleInterior(crossingRoute.Points, new RectangleF(crossingNode.x, crossingNode.y, crossingNode.w, crossingNode.h)), "避线时穿过了方块");
+                    }
+                }
+                foreach (bool reversed in new[] { false, true })
+                {
+                    GraphDocument portsGraph = GraphSerialization.CreateBlank("等分连接点避让");
+                    for (int i = 0; i < 4; i++)
+                        portsGraph.nodes.Add(new GraphNode { id = "left" + i, label = "处理步骤", x = 0, y = i * 100, w = 150, h = 54 });
+                    for (int i = 0; i < 2; i++)
+                        portsGraph.nodes.Add(new GraphNode { id = "right" + i, label = "处理步骤", x = 244, y = (i + 1) * 100, w = 150, h = 54 });
+                    for (int i = 0; i < 4; i++)
+                        portsGraph.edges.Add(new GraphEdge { id = "offset" + i, source = "left" + i, target = "right" + (i == 0 ? 0 : 1), sourceType = "node", targetType = "node", lineType = "auto" });
+                    if (reversed) portsGraph.edges.Reverse();
+                    portsGraph = GraphSerialization.Normalize(portsGraph);
+                    string beforePorts = GraphSerialization.Serialize(portsGraph, false);
+                    GraphLayoutResult portsResult = GraphLayout.CalculateRoutes(portsGraph);
+                    Require(beforePorts == GraphSerialization.Serialize(portsGraph, false), "等分避让改变节点或关系数据");
+                    Require(portsResult.Edges.Values.Any(r => Math.Abs(r.SourcePoint.Y - (portsGraph.nodes.First(n => n.id == portsGraph.edges.First(e => e.id == r.EdgeId).source).y + 27)) > 1f), "截图场景未使用偏移出线点");
+                    Require(portsResult.Edges["offset0"].TargetPoint.Y < 127f, "目标连接点未向上偏移避让");
+                    GraphEdgeLayout[] offsetRoutes = portsResult.Edges.Values.ToArray();
+                    for (int first = 0; first < offsetRoutes.Length; first++)
+                        for (int second = first + 1; second < offsetRoutes.Length; second++)
+                        {
+                            if (portsGraph.edges.First(e => e.id == offsetRoutes[first].EdgeId).target == portsGraph.edges.First(e => e.id == offsetRoutes[second].EdgeId).target) continue;
+                            IList<PointF> firstLine = offsetRoutes[first].Points, secondLine = offsetRoutes[second].Points;
+                    for (int i = 1; i < firstLine.Count; i++)
+                        for (int j = 1; j < secondLine.Count; j++)
+                        {
+                            PointF a = firstLine[i - 1], b = firstLine[i], c = secondLine[j - 1], d = secondLine[j];
+                            bool horizontal = Math.Abs(a.Y - b.Y) < .01f;
+                            if (horizontal == (Math.Abs(c.Y - d.Y) < .01f)) continue;
+                            PointF hit = horizontal ? new PointF(c.X, a.Y) : new PointF(a.X, c.Y);
+                            bool intersects = hit.X >= Math.Min(a.X, b.X) - .01f && hit.X <= Math.Max(a.X, b.X) + .01f && hit.Y >= Math.Min(a.Y, b.Y) - .01f && hit.Y <= Math.Max(a.Y, b.Y) + .01f
+                                && hit.X >= Math.Min(c.X, d.X) - .01f && hit.X <= Math.Max(c.X, d.X) + .01f && hit.Y >= Math.Min(c.Y, d.Y) - .01f && hit.Y <= Math.Max(c.Y, d.Y) + .01f;
+                            Require(!intersects, "截图类型的折线交叉没有避开");
+                        }
+                        }
+                    foreach (GraphEdgeLayout r in portsResult.Edges.Values)
+                    {
+                        Require(r.SourceSide == "right" && r.TargetSide == "left", "等分避让不应绕到其他边");
+                        if (r.Points.Count > 2)
+                            Require(r.Points.Count == 4 && Math.Abs(r.Points[1].X - (r.SourcePoint.X + r.TargetPoint.X) / 2f) < .01f, "无障碍的等分连线未在节点间居中转折");
+                        Require(!r.HasObstacleConflict && RouteIsOrthogonal(r.Points), "等分避让路线存在冲突");
+                        foreach (GraphNode n in portsGraph.nodes)
+                            Require(!RouteCrossesRectangleInterior(r.Points, new RectangleF(n.x, n.y, n.w, n.h)), "等分避让穿过节点");
+                    }
+                }
+                foreach (bool verticalMerge in new[] { false, true })
+                foreach (bool reverseMerge in new[] { false, true })
+                {
+                    GraphDocument mergeGraph = GraphSerialization.CreateBlank("直线主干汇入测试");
+                    for (int i = 0; i < 4; i++)
+                    {
+                        mergeGraph.nodes.Add(new GraphNode { id = "source" + i, label = "处理步骤", x = 0, y = i * 100, w = 150, h = 54 });
+                        mergeGraph.edges.Add(new GraphEdge { id = "merge" + i, source = "source" + i, target = "target", sourceType = "node", targetType = "node", lineType = "auto" });
+                    }
+                    mergeGraph.nodes.Add(new GraphNode { id = "target", label = "目标", x = 270, y = 100, w = 150, h = 54 });
+                    if (verticalMerge)
+                        foreach (GraphNode n in mergeGraph.nodes)
+                        {
+                            float x = n.x, width = n.w; n.x = n.y; n.y = x; n.w = n.h; n.h = width;
+                        }
+                    if (reverseMerge) mergeGraph.edges.Reverse();
+                    mergeGraph = GraphSerialization.Normalize(mergeGraph);
+                    string beforeMerge = GraphSerialization.Serialize(mergeGraph, false);
+                    GraphLayoutResult merged = GraphLayout.CalculateRoutes(mergeGraph, new GraphLayoutOptions { Direction = verticalMerge ? GraphLayoutDirection.TopToBottom : GraphLayoutDirection.LeftToRight });
+                    Require(beforeMerge == GraphSerialization.Serialize(mergeGraph, false), "主干汇入改变了节点或关系");
+                    GraphEdgeLayout baseline = merged.Edges["merge1"];
+                    Require(baseline.Points.Count == 2, "汇入主干不再是直线");
+                    foreach (GraphEdgeLayout r in merged.Edges.Values)
+                    {
+                        Require(PointsClose(r.TargetPoint, baseline.TargetPoint), "分支未共用主干入口");
+                        Require(!r.HasObstacleConflict && RouteIsOrthogonal(r.Points), "主干汇入存在障碍冲突");
+                        if (r.EdgeId == "merge1") continue;
+                        Require(r.Points.Count == 4, "汇入分支有多余拐点");
+                        Require(verticalMerge ? Math.Abs(r.Points[1].Y - 210f) < .01f && Math.Abs(r.Points[2].X - baseline.TargetPoint.X) < .01f
+                            : Math.Abs(r.Points[1].X - 210f) < .01f && Math.Abs(r.Points[2].Y - baseline.TargetPoint.Y) < .01f, "分支未在中间汇入直线主干");
                     }
                 }
                 GraphDocument routeOnlyGraph = GraphSerialization.CreateBlank("仅路由保留边界测试");

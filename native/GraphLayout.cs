@@ -735,10 +735,15 @@ namespace RelationshipGraphNative
                         RectangleF bounds = request.Source ? request.Work.SourceBounds : request.Work.TargetBounds;
                         string side = request.Source ? request.Work.SourceSide : request.Work.TargetSide;
                         PointF point = SharedPortPoint(bounds, side);
-                        // Preserve a shared trunk only for the same origin. Other origins
-                        // receive separate entry points, keeping the best aligned one centered.
+                        // An aligned incoming edge defines a shared target trunk.
+                        // Without a straight baseline, keep incoming ports separated.
                         List<string> origins = list.Select(item => item.Work.SourceKey).Distinct().ToList();
-                        if (origins.Count > 1)
+                        float targetCenter = side == "left" || side == "right" ? bounds.Top + bounds.Height / 2f : bounds.Left + bounds.Width / 2f;
+                        bool sharedTarget = !request.Source && list.Any(item => !item.Source && NearlyEqual(item.OppositeCoordinate, targetCenter)
+                            && ((side == "left" && item.Work.SourceSide == "right") || (side == "right" && item.Work.SourceSide == "left")
+                                || (side == "top" && item.Work.SourceSide == "bottom") || (side == "bottom" && item.Work.SourceSide == "top")));
+                        if (!request.Source) request.Work.SharedTargetTrunk = sharedTarget;
+                        if (origins.Count > 1 && !sharedTarget)
                         {
                             float center = side == "left" || side == "right" ? bounds.Top + bounds.Height / 2f : bounds.Left + bounds.Width / 2f;
                             PortRequest anchor = list.OrderBy(item => Math.Abs(item.OppositeCoordinate - center)).First();
@@ -815,11 +820,16 @@ namespace RelationshipGraphNative
                 }
                 return null;
             }
+            private static bool SharesTargetTrunk(EdgeWork first, EdgeWork second)
+            {
+                return first.SharedTargetTrunk && second.SharedTargetTrunk && first.TargetKey == second.TargetKey && first.TargetSide == second.TargetSide;
+            }
+
             private bool HasAmbiguousOverlap(EdgeWork work, IList<PointF> points)
             {
                 foreach (EdgeWork other in _edgeWork)
                 {
-                    if (other == work || other.Route == null || other.SourceKey == work.SourceKey) continue;
+                    if (other == work || other.Route == null || other.SourceKey == work.SourceKey || SharesTargetTrunk(work, other)) continue;
                     for (int i = 1; i < points.Count; i++)
                         for (int j = 1; j < other.Route.Points.Count; j++)
                         {
@@ -837,7 +847,7 @@ namespace RelationshipGraphNative
                 int count = 0;
                 foreach (EdgeWork other in _edgeWork)
                 {
-                    if (other == work || other.Route == null || other.SourceKey == work.SourceKey) continue;
+                    if (other == work || other.Route == null || other.SourceKey == work.SourceKey || SharesTargetTrunk(work, other)) continue;
                     IList<PointF> line = other.Route.Points;
                     for (int i = 1; i < points.Count; i++)
                         for (int j = 1; j < line.Count; j++)
@@ -855,14 +865,56 @@ namespace RelationshipGraphNative
                 return count;
             }
 
+            private IEnumerable<PointF> AvoidancePorts(RectangleF bounds, string side, PointF allocated, bool allowOffsets)
+            {
+                yield return allocated;
+                if (!allowOffsets) yield break;
+                // Search both ends on their current sides before considering another side.
+                // Quarter divisions leave room for corners, arrowheads and adjacent lines.
+                bool vertical = side == "left" || side == "right";
+                float length = vertical ? bounds.Height : bounds.Width;
+                float padding = Math.Min(SafePositive(_options.PortCornerPadding, 15f), length / 4f);
+                for (int index = 1; index <= 3; index++)
+                {
+                    float offset = Math.Max(padding, Math.Min(length - padding, length * index / 4f));
+                    PointF point = SharedPortPoint(bounds, side);
+                    if (vertical) point.Y = bounds.Top + offset;
+                    else point.X = bounds.Left + offset;
+                    if (!SamePoint(point, allocated)) yield return point;
+                }
+            }
+
+            private List<PointF> CenteredAvoidancePath(PointF source, PointF target, string sourceSide, string targetSide, List<Obstacle> obstacles)
+            {
+                bool horizontal = (sourceSide == "right" && targetSide == "left" && target.X > source.X + 24f)
+                    || (sourceSide == "left" && targetSide == "right" && source.X > target.X + 24f);
+                bool vertical = (sourceSide == "bottom" && targetSide == "top" && target.Y > source.Y + 24f)
+                    || (sourceSide == "top" && targetSide == "bottom" && source.Y > target.Y + 24f);
+                if (!horizontal && !vertical) return null;
+                for (int lane = 0; lane < 17; lane++)
+                {
+                    float fraction = .5f + (lane == 0 ? 0f : (lane % 2 == 1 ? -1f : 1f) * ((lane + 1) / 2) / 20f);
+                    float channel = horizontal ? source.X + (target.X - source.X) * fraction : source.Y + (target.Y - source.Y) * fraction;
+                    List<PointF> candidate = horizontal
+                        ? new List<PointF>(new[] { source, new PointF(channel, source.Y), new PointF(channel, target.Y), target })
+                        : new List<PointF>(new[] { source, new PointF(source.X, channel), new PointF(target.X, channel), target });
+                    candidate = SimplifyPath(candidate);
+                    if (PathClear(candidate, obstacles)) return candidate;
+                }
+                return null;
+            }
+
             private void ReduceCrossings(EdgeWork work)
             {
                 GraphEdgeLayout route = work.Route;
-                if (route == null || route.Points.Count == 2 || route.HasObstacleConflict || CrossingCount(work, route.Points) == 0) return;
+                if (route == null || route.Points.Count == 2 || route.HasObstacleConflict) return;
+                bool conflict = CrossingCount(work, route.Points) != 0 || HasAmbiguousOverlap(work, route.Points);
+                if (!conflict && work.SharedTargetTrunk) return;
+                if (!conflict && (route.Points.Count == 2 || !_edgeWork.Any(other => other != work && other.SourceKey != work.SourceKey))) return;
                 List<Obstacle> obstacles = ObstaclesFor(work);
                 foreach (EdgeWork other in _edgeWork)
                 {
-                    if (other == work || other.Route == null || other.SourceKey == work.SourceKey) continue;
+                    if (other == work || other.Route == null || other.SourceKey == work.SourceKey || SharesTargetTrunk(work, other)) continue;
                     for (int i = 1; i < other.Route.Points.Count; i++)
                     {
                         PointF a = other.Route.Points[i - 1], b = other.Route.Points[i];
@@ -872,16 +924,16 @@ namespace RelationshipGraphNative
                     }
                 }
                 string[] sourceSides = new[] { work.SourceSide, "right", "bottom", "left", "top" }.Distinct().ToArray();
-                string[] targetSides = new[] { work.TargetSide, "left", "top", "right", "bottom" }.Distinct().ToArray();
+                string[] targetSides = work.SharedTargetTrunk ? new[] { work.TargetSide } : new[] { work.TargetSide, "left", "top", "right", "bottom" }.Distinct().ToArray();
                 List<PointF> best = null;
                 string bestSource = work.SourceSide, bestTarget = work.TargetSide;
-                float bestScore = Single.MaxValue;
+                float bestScore = conflict ? Single.MaxValue : PathLength(route.Points) + route.Points.Count * 18f;
                 foreach (string sourceSide in sourceSides)
                     foreach (string targetSide in targetSides)
+                    foreach (PointF source in AvoidancePorts(work.SourceBounds, sourceSide, sourceSide == work.SourceSide ? work.SourcePoint : SharedPortPoint(work.SourceBounds, sourceSide), sourceSide == work.SourceSide && targetSide == work.TargetSide))
+                    foreach (PointF target in AvoidancePorts(work.TargetBounds, targetSide, targetSide == work.TargetSide ? work.TargetPoint : SharedPortPoint(work.TargetBounds, targetSide), !work.SharedTargetTrunk && sourceSide == work.SourceSide && targetSide == work.TargetSide))
                     {
                         _options.ThrowIfCancellationRequested();
-                        PointF source = sourceSide == work.SourceSide ? work.SourcePoint : SharedPortPoint(work.SourceBounds, sourceSide);
-                        PointF target = targetSide == work.TargetSide ? work.TargetPoint : SharedPortPoint(work.TargetBounds, targetSide);
                         PointF start = OffsetBySide(source, sourceSide, 12f), end = OffsetBySide(target, targetSide, 12f);
                         if (!SegmentClear(source, start, obstacles) || !SegmentClear(end, target, obstacles)) continue;
                         // A bounded candidate search keeps dense graphs responsive.
@@ -889,8 +941,14 @@ namespace RelationshipGraphNative
                         if (core == null) continue;
                         List<PointF> candidate = new List<PointF>(); candidate.Add(source); AppendWithoutDuplicate(candidate, core); candidate.Add(target);
                         candidate = SimplifyPath(candidate);
+                        // Compare complete paths: a one-bend stub path can hide an extra
+                        // bend at the endpoint and incorrectly win over a centered route.
+                        List<PointF> centered = CenteredAvoidancePath(source, target, sourceSide, targetSide, obstacles);
+                        if (centered != null && PathLength(centered) + centered.Count * 18f <= PathLength(candidate) + candidate.Count * 18f + Epsilon)
+                            candidate = centered;
                         if (!PathClear(candidate, obstacles) || HasAmbiguousOverlap(work, candidate) || CrossingCount(work, candidate) != 0) continue;
-                        float score = PathLength(candidate) + candidate.Count * 18f + (sourceSide == work.SourceSide ? 0 : 12f) + (targetSide == work.TargetSide ? 0 : 12f);
+                        float score = PathLength(candidate) + candidate.Count * 18f + (sourceSide == work.SourceSide ? 0 : 12f) + (targetSide == work.TargetSide ? 0 : 12f)
+                            + (SamePoint(source, work.SourcePoint) ? 0 : 2f) + (SamePoint(target, work.TargetPoint) ? 0 : 2f);
                         if (score < bestScore) { best = candidate; bestScore = score; bestSource = sourceSide; bestTarget = targetSide; }
                     }
                 if (best == null) return;
@@ -1471,6 +1529,7 @@ namespace RelationshipGraphNative
             public int SourcePortCount;
             public int TargetPortIndex;
             public int TargetPortCount;
+            public bool SharedTargetTrunk;
             public GraphEdgeLayout Route;
 
             public EdgeWork(GraphEdge edge, int inputOrder, string sourceKey, string targetKey, RectangleF sourceBounds, RectangleF targetBounds)

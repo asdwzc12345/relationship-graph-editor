@@ -22,7 +22,7 @@ namespace RelationshipGraphNative
         private readonly ToolStripProgressBar _workProgress = new ToolStripProgressBar();
         private readonly ToolStripStatusLabel _cancelWork = new ToolStripStatusLabel("取消");
         private readonly ToolStripButton _undoButton = new ToolStripButton("撤销");
-        private readonly ToolStripButton _redoButton = new ToolStripButton("重做");
+        private readonly ToolStripButton _redoButton = new ToolStripButton("向前");
         private readonly ToolStripComboBox _lineTypeBox = new ToolStripComboBox();
         private readonly ToolStripComboBox _directionBox = new ToolStripComboBox();
         private readonly ToolStripComboBox _depthBox = new ToolStripComboBox();
@@ -223,7 +223,7 @@ namespace RelationshipGraphNative
 
             ToolStripMenuItem edit = new ToolStripMenuItem("编辑(&E)");
             edit.DropDownItems.Add(MenuItem("撤销", Keys.Control | Keys.Z, Undo));
-            edit.DropDownItems.Add(MenuItem("重做", Keys.Control | Keys.Y, Redo));
+            edit.DropDownItems.Add(MenuItem("向前", Keys.Control | Keys.Y, Redo));
             edit.DropDownItems.Add(new ToolStripSeparator());
             edit.DropDownItems.Add(MenuItem("查找", Keys.Control | Keys.F, delegate { FocusSearch(); }));
             edit.DropDownItems.Add(MenuItem("替换…", Keys.Control | Keys.H, ShowReplaceDialog));
@@ -236,10 +236,6 @@ namespace RelationshipGraphNative
             edit.DropDownItems.Add(MenuItem("新增节点", Keys.Insert, AddNode));
             edit.DropDownItems.Add(MenuItem("新增关系…", Keys.Control | Keys.L, AddRelation));
             edit.DropDownItems.Add(MenuItem("删除选中项", Keys.Delete, DeleteSelected));
-
-            ToolStripMenuItem arrange = new ToolStripMenuItem("排列"); arrange.DropDown.ShowItemToolTips = true;
-            AddArrangementItems(arrange.DropDownItems, true);
-
 
             ToolStripMenuItem view = new ToolStripMenuItem("视图(&V)");
             view.DropDownItems.Add(new ToolStripSeparator());
@@ -261,7 +257,7 @@ namespace RelationshipGraphNative
             ToolStripMenuItem help = new ToolStripMenuItem("帮助(&H)");
             help.DropDownItems.Add(MenuItem("操作说明", Keys.F1, ShowHelp));
             help.DropDownItems.Add(MenuItem("关于", Keys.None, ShowAbout));
-            menu.Items.Add(file); menu.Items.Add(edit); menu.Items.Add(arrange); menu.Items.Add(view); menu.Items.Add(help);
+            menu.Items.Add(file); menu.Items.Add(edit); menu.Items.Add(view); menu.Items.Add(help);
             return menu;
         }
 
@@ -273,18 +269,14 @@ namespace RelationshipGraphNative
             tools.AutoSize = true;
             tools.LayoutStyle = ToolStripLayoutStyle.HorizontalStackWithOverflow;
             _undoButton.Click += delegate { Undo(); }; _redoButton.Click += delegate { Redo(); };
+            _undoButton.ToolTipText = "撤销（Ctrl+Z）"; _redoButton.ToolTipText = "向前（Ctrl+Y）";
 
             ToolStripButton addGroup = new ToolStripButton("＋分组"); addGroup.Click += delegate { AddGroup(); };
             ToolStripButton addNode = new ToolStripButton("＋节点"); addNode.Click += delegate { if (!IsFlowchart) AddNode(); else _statusText.Text = "请从左侧组件库选择或拖入流程图形"; };
-            ToolStripButton fit = new ToolStripButton("适合窗口"); fit.Click += delegate { _canvas.FitToView(); };
-            ToolStripButton zoomOut = new ToolStripButton("－"); zoomOut.Click += delegate { _canvas.ZoomBy(.85f); };
-            ToolStripButton zoomIn = new ToolStripButton("＋"); zoomIn.Click += delegate { _canvas.ZoomBy(1.18f); };
             addGroup.AccessibleName = "新增分组"; addNode.AccessibleName = "新增节点";
-            fit.AccessibleName = "适合窗口"; zoomOut.AccessibleName = "缩小画布"; zoomIn.AccessibleName = "放大画布";
             addGroup.ToolTipText = "在视野中心新增分组"; addNode.ToolTipText = "在视野中心新增节点";
-            fit.ToolTipText = "显示全部内容（Ctrl+0）"; zoomOut.ToolTipText = "缩小"; zoomIn.ToolTipText = "放大";
 
-            _lineTypeBox.AutoSize = false; _lineTypeBox.DropDownStyle = ComboBoxStyle.DropDownList; _lineTypeBox.Width = 100; _lineTypeBox.DropDownWidth = 120;
+            _lineTypeBox.AutoSize = false; _lineTypeBox.DropDownStyle = ComboBoxStyle.DropDownList; SizeFiveCharacterCombo(_lineTypeBox);
             _lineTypeBox.AccessibleName = "新关系线型";
             _lineTypeBox.Items.AddRange(new object[] { "自动避障", "曲线", "直线", "折线" }); _lineTypeBox.SelectedIndex = 0;
             _lineTypeBox.SelectedIndexChanged += delegate { _canvas.NewLineType = LineTypeAt(_lineTypeBox.SelectedIndex); };
@@ -296,7 +288,7 @@ namespace RelationshipGraphNative
             _depthBox.AccessibleName = "关系高亮层数";
             _depthBox.Items.AddRange(new object[] { "1层", "2层", "3层" }); _depthBox.SelectedIndex = 0;
             _depthBox.SelectedIndexChanged += delegate { _canvas.FocusDepth = _depthBox.SelectedIndex + 1; _canvas.Invalidate(); };
-            _themeBox.AutoSize = false; _themeBox.DropDownStyle = ComboBoxStyle.DropDownList; _themeBox.Width = 128; _themeBox.DropDownWidth = 148;
+            _themeBox.AutoSize = false; _themeBox.DropDownStyle = ComboBoxStyle.DropDownList; SizeFiveCharacterCombo(_themeBox);
             _themeBox.AccessibleName = "界面主题";
             _themeBox.Items.AddRange(new object[] { "跟随系统", "浅色", "深色" }); _themeBox.SelectedIndex = ThemeIndex(_themeMode);
             _themeBox.SelectedIndexChanged += delegate { if (!_settingUi) ChangeTheme(ThemeAt(_themeBox.SelectedIndex)); };
@@ -309,7 +301,6 @@ namespace RelationshipGraphNative
             AddArrangementItems(tools.Items, false); tools.Items.Add(new ToolStripSeparator());
             tools.Items.Add(new ToolStripLabel("新关系线型")); tools.Items.Add(_lineTypeBox); tools.Items.Add(new ToolStripSeparator());
             tools.Items.Add(new ToolStripLabel("高亮")); tools.Items.Add(_directionBox); tools.Items.Add(_depthBox); tools.Items.Add(new ToolStripSeparator());
-            tools.Items.Add(fit); tools.Items.Add(zoomOut); tools.Items.Add(zoomIn); tools.Items.Add(new ToolStripSeparator());
             tools.Items.Add(new ToolStripLabel("主题")); tools.Items.Add(_themeBox); tools.Items.Add(new ToolStripSeparator());
             tools.Items.Add(new ToolStripLabel("查找")); tools.Items.Add(_searchBox);
             foreach (ToolStripItem item in tools.Items)
@@ -318,6 +309,19 @@ namespace RelationshipGraphNative
                 if (item is ToolStripLabel) item.Margin = new Padding(5, 1, 3, 2);
             }
             return tools;
+        }
+
+        private static void SizeFiveCharacterCombo(ToolStripComboBox box)
+        {
+            Action resize = delegate
+            {
+                int width = TextRenderer.MeasureText("汉汉汉汉汉", box.Font).Width
+                    + SystemInformation.VerticalScrollBarWidth + 24;
+                box.Width = Math.Max(180, width);
+                box.DropDownWidth = box.Width;
+            };
+            box.ComboBox.FontChanged += delegate { resize(); };
+            resize();
         }
 
         private StatusStrip BuildStatus()
@@ -1151,7 +1155,7 @@ namespace RelationshipGraphNative
         {
             FinishPendingCanvasWork();
             if (_redo.Count == 0) return; _undo.Push(_canvas.Document); _canvas.RestoreDocumentPreservingView(_redo.Pop());
-            RefreshDirtyFromSavePoint(); bool autosaved = _isDirty ? SaveAutosave() : ClearAutosaveSafely(); ApplyTheme(); RebuildInspector(); UpdateStatus(); QueueRoutingRefresh(); if (autosaved) _statusText.Text = "已重做"; UpdateTitle();
+            RefreshDirtyFromSavePoint(); bool autosaved = _isDirty ? SaveAutosave() : ClearAutosaveSafely(); ApplyTheme(); RebuildInspector(); UpdateStatus(); QueueRoutingRefresh(); if (autosaved) _statusText.Text = "已向前"; UpdateTitle();
         }
 
         private void AddGroup()
