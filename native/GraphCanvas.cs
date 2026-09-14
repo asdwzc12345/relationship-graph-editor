@@ -410,7 +410,7 @@ namespace RelationshipGraphNative
                 RectangleF bounds;
                 if (!layout.TryGetNodeBounds(node.id, out bounds) || !IsFiniteRectangle(bounds)) continue;
                 node.x = ClampWorldCoordinate(bounds.X); node.y = ClampWorldCoordinate(bounds.Y);
-                node.w = ClampItemDimension(bounds.Width, 105f); node.h = ClampItemDimension(bounds.Height, 46f);
+                node.w = ClampItemDimension(bounds.Width, 105f); node.h = ClampItemDimension(bounds.Height, 50f);
             }
             foreach (GraphGroup group in _document.groups)
             {
@@ -1136,6 +1136,7 @@ namespace RelationshipGraphNative
 
         private void ApplySelectionMove(float dx, float dy, bool freePlacement)
         {
+            dx = Snap(dx); dy = Snap(dy);
             if (_nodeStarts.Count == 0 && _groupStarts.Count == 0) return;
             List<RectangleF> starts = new List<RectangleF>();
             starts.AddRange(_groupStarts.Values);
@@ -1532,6 +1533,7 @@ namespace RelationshipGraphNative
 
         private void ApplyNodeMove(float dx, float dy, bool freePlacement)
         {
+            dx = Snap(dx); dy = Snap(dy);
             if (_nodeStarts.Count == 0) return;
             float left = _nodeStarts.Min(delegate(KeyValuePair<string, PointF> pair) { return pair.Value.X; });
             float top = _nodeStarts.Min(delegate(KeyValuePair<string, PointF> pair) { return pair.Value.Y; });
@@ -1653,7 +1655,7 @@ namespace RelationshipGraphNative
                 float available = AxisStart(last, horizontal) - AxisEnd(first, horizontal) - length;
                 gap = available / 2f; targetStart = AxisEnd(first, horizontal) + gap;
             }
-            if (gap < 8f) return;
+            if (gap < 8f || Math.Abs(Snap(targetStart) - targetStart) > .001f) return;
             float originalStart = AxisStart(movingStart, horizontal), targetDelta = targetStart - originalStart;
             float currentDelta = horizontal ? dx : dy, difference = Math.Abs(targetDelta - currentDelta);
             if (difference > threshold) return;
@@ -1707,6 +1709,7 @@ namespace RelationshipGraphNative
         private static void ConsiderAlignment(float target, float moving, ref float bestDistance, ref float bestAdjustment, ref float bestGuide)
         {
             float adjustment = target - moving, distance = Math.Abs(adjustment);
+            if (Math.Abs(Snap(adjustment) - adjustment) > .001f) return;
             if (distance >= bestDistance) return;
             bestDistance = distance; bestAdjustment = adjustment; bestGuide = target;
         }
@@ -1743,6 +1746,7 @@ namespace RelationshipGraphNative
 
         private void ApplyGroupMove(float dx, float dy, bool freePlacement)
         {
+            dx = Snap(dx); dy = Snap(dy);
             GraphGroup group = _groups[_gestureEntityId];
             if (freePlacement)
             {
@@ -2937,7 +2941,7 @@ namespace RelationshipGraphNative
             float width = Math.Min(group.w - 12, Math.Max(100, (group.label ?? "分组").Length * 16 + 28));
             return new RectangleF(group.x + 6, group.y + 4, width, 30);
         }
-        private static float Snap(float value) { return (float)Math.Round(value / 5f) * 5f; }
+        private static float Snap(float value) { return GraphSerialization.SnapToGrid(value); }
         private static float Distance(Point a, Point b) { float dx = a.X - b.X, dy = a.Y - b.Y; return (float)Math.Sqrt(dx * dx + dy * dy); }
         private static float Distance(PointF a, PointF b) { float dx = a.X - b.X, dy = a.Y - b.Y; return (float)Math.Sqrt(dx * dx + dy * dy); }
         private static string DirectionSide(PointF start, PointF end, string fallback)

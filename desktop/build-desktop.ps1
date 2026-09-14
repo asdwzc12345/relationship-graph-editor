@@ -9,7 +9,6 @@ param(
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $nativeRoot = Join-Path $projectRoot "native"
-$defaultGraphPath = Join-Path $projectRoot "system-function-graph.json"
 $iconPath = Join-Path $projectRoot "assets\app-icon.ico"
 $manifestPath = Join-Path $PSScriptRoot "app.manifest"
 $outputPath = if ([IO.Path]::IsPathRooted($OutputName)) {
@@ -26,7 +25,6 @@ $compilerPath = $compilerCandidates | Where-Object { Test-Path $_ } | Select-Obj
 
 if (-not $compilerPath) { throw "Windows C# compiler was not found." }
 if (-not (Test-Path $nativeRoot)) { throw "native source folder was not found." }
-if (-not (Test-Path $defaultGraphPath)) { throw "system-function-graph.json was not found." }
 if (-not (Test-Path $iconPath)) { throw "assets\app-icon.ico was not found." }
 if (-not (Test-Path $manifestPath)) { throw "desktop\app.manifest was not found." }
 if ([String]::IsNullOrWhiteSpace($outputDirectory)) { throw "The output directory could not be determined." }
@@ -123,7 +121,6 @@ $compilerArguments = @(
   "/reference:System.Windows.Forms.dll"
   "/reference:System.Web.Extensions.dll"
   "/reference:System.Xml.dll"
-  "/resource:$defaultGraphPath,RelationshipGraphNative.Data.default.json"
   "/resource:$iconPath,RelationshipGraphNative.Assets.app-icon.ico"
 ) + $sourcePaths
 

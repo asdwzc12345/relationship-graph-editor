@@ -75,6 +75,8 @@ namespace RelationshipGraphNative
                     }
                 }
             }
+            foreach (Item item in items)
+                item.Offset = new PointF(GraphSerialization.SnapToGrid(item.Bounds.X + item.Offset.X) - item.Bounds.X, GraphSerialization.SnapToGrid(item.Bounds.Y + item.Offset.Y) - item.Bounds.Y);
             if (!items.Any(item => Math.Abs(item.Offset.X) > .001f || Math.Abs(item.Offset.Y) > .001f)) return false;
             // Resolve owners before moving anything: a group and its contents move only once.
             foreach (GraphNode node in graph.nodes)

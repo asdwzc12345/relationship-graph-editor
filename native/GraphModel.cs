@@ -4,7 +4,6 @@ using System.Drawing;
 using System.Globalization;
 using System.IO;
 using System.Linq;
-using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Web.Script.Serialization;
@@ -49,10 +48,11 @@ namespace RelationshipGraphNative
         public string id { get; set; }
         public string label { get; set; }
         public List<string> groups { get; set; }
-        public float x { get; set; }
-        public float y { get; set; }
-        public float w { get; set; }
-        public float h { get; set; }
+        private float _x, _y, _w, _h;
+        public float x { get { return _x; } set { _x = GraphSerialization.SnapToGrid(value); } }
+        public float y { get { return _y; } set { _y = GraphSerialization.SnapToGrid(value); } }
+        public float w { get { return _w; } set { _w = GraphSerialization.SnapToGrid(value); } }
+        public float h { get { return _h; } set { _h = GraphSerialization.SnapToGrid(value); } }
     }
 
     public sealed class GraphNode
@@ -64,10 +64,11 @@ namespace RelationshipGraphNative
         public string shape { get; set; }
         public string group { get; set; }
         public List<string> groups { get; set; }
-        public float x { get; set; }
-        public float y { get; set; }
-        public float w { get; set; }
-        public float h { get; set; }
+        private float _x, _y, _w, _h;
+        public float x { get { return _x; } set { _x = GraphSerialization.SnapToGrid(value); } }
+        public float y { get { return _y; } set { _y = GraphSerialization.SnapToGrid(value); } }
+        public float w { get { return _w; } set { _w = GraphSerialization.SnapToGrid(value); } }
+        public float h { get { return _h; } set { _h = GraphSerialization.SnapToGrid(value); } }
         public string note { get; set; }
     }
 
@@ -108,6 +109,17 @@ namespace RelationshipGraphNative
 
     public static class GraphSerialization
     {
+        public const float GridStep = 5f;
+
+        public static float SnapToGrid(float value)
+        {
+            if (Single.IsNaN(value) || Single.IsInfinity(value)) return value;
+            // At large coordinates, use a grid multiple representable by a float.
+            double precision = Math.Abs(value) < 16777216f ? 1d : Math.Pow(2, Math.Floor(Math.Log(Math.Abs((double)value), 2)) - 23);
+            double step = GridStep * precision;
+            return (float)(Math.Round(value / step, MidpointRounding.AwayFromZero) * step);
+        }
+
         public const int SchemaVersion = 3;
         public const string ClipboardFormat = "relationship-graph-native-selection-v1";
         public const int MaxGroups = 400;
@@ -268,17 +280,6 @@ namespace RelationshipGraphNative
             throw new InvalidDataException("该 HTML 不是本工具生成的只读可视图。");
         }
 
-        public static GraphDocument LoadDefault()
-        {
-            Assembly assembly = Assembly.GetExecutingAssembly();
-            using (Stream stream = assembly.GetManifestResourceStream("RelationshipGraphNative.Data.default.json"))
-            {
-                if (stream == null) return CreateBlank("测试用图");
-                using (StreamReader reader = new StreamReader(stream, Encoding.UTF8))
-                    return Deserialize(reader.ReadToEnd());
-            }
-        }
-
         public static GraphDocument CreateBlank(string title)
         {
             GraphDocument graph = new GraphDocument();
@@ -299,10 +300,7 @@ namespace RelationshipGraphNative
                 colors = new Dictionary<string, string>(),
                 relationTypes = new List<RelationType>
                 {
-                    new RelationType { id = "core", label = "主要流程", color = "#e8963e" },
-                    new RelationType { id = "economy", label = "资源支持", color = "#4b9eea" },
-                    new RelationType { id = "content", label = "目标与记录", color = "#d765a4" },
-                    new RelationType { id = "growth", label = "反馈改进", color = "#54ad72" }
+                    new RelationType { id = "core", label = "关系", color = "#4b9eea" }
                 }
             };
         }
@@ -367,7 +365,7 @@ namespace RelationshipGraphNative
                 node.group = groupIdMap.TryGetValue(originalGroup, out mappedGroup) ? mappedGroup : (groupIds.Contains(originalGroup) ? originalGroup : "");
                 node.groups = new List<string>();
                 node.w = Clamp(Finite(node.w, 150), 105, MaxItemDimension);
-                node.h = Clamp(Finite(node.h, 54), 46, MaxItemDimension);
+                node.h = Clamp(Finite(node.h, 55), 50, MaxItemDimension);
                 node.x = Clamp(Finite(node.x, 40), -MaxCoordinate, MaxCoordinate);
                 node.y = Clamp(Finite(node.y, 80), -MaxCoordinate, MaxCoordinate);
                 node.note = Clean(node.note, "", 300);

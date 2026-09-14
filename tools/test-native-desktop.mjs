@@ -26,7 +26,10 @@ assert.ok(sources.every((name) => /^[A-Za-z0-9_.-]+\.cs$/.test(name)), "native �
 assert.match(buildScript, /native/i);
 assert.match(buildScript, /System\.Drawing\.dll/);
 assert.match(buildScript, /System\.Windows\.Forms\.dll/);
-assert.match(buildScript, /RelationshipGraphNative\.Data\.default\.json/);
+assert.doesNotMatch(buildScript, /RelationshipGraphNative\.Data\.default\.json/);
+assert.doesNotMatch(sourceText, /LoadDefault|恢复默认测试用图/);
+const startupCode = mainFormText.slice(0, mainFormText.indexOf("private MenuStrip BuildMenu"));
+assert.doesNotMatch(startupCode, /TryLoadAutosave/);
 assert.match(buildScript, /win32icon:\$iconPath/);
 assert.match(buildScript, /win32manifest:\$manifestPath/);
 assert.match(buildScript, /RelationshipGraphNative\.Assets\.app-icon\.ico/);
@@ -48,15 +51,12 @@ assert.equal(packageJson.scripts?.test, "npm run test:native");
 assert.equal(packageJson.scripts?.audit, "npm run audit:native");
 assert.match(packageJson.scripts?.["test:native"] || "", /build:desktop.*test-native-desktop/s);
 assert.match(packageJson.scripts?.["audit:native"] || "", /test-native-desktop\.mjs --static/);
-assert.ok(Object.entries(packageJson.scripts || {})
-  .filter(([name]) => !name.startsWith("legacy:"))
-  .every(([, command]) => !command.includes("legacy-web")), "默认命令不应调用旧网页检查");
+assert.ok(Object.values(packageJson.scripts || {})
+  .every((command) => !command.includes("legacy-web")), "项目命令不应调用已移除的旧网页检查");
 for (const file of ["index.html", "app.js", "app.css", "system-function-default.js"]) {
   assert.ok(!fs.existsSync(path.join(root, file)), `旧网页文件仍留在根目录：${file}`);
-  assert.ok(fs.existsSync(path.join(root, "legacy-web", file)), `legacy-web 缺少文件：${file}`);
 }
-assert.ok(fs.existsSync(path.join(root, "system-function-graph.json")), "根目录缺少原生默认图数据源");
-assert.ok(!fs.existsSync(path.join(root, "legacy-web", "system-function-graph.json")), "旧网页目录不应复制默认图 JSON 数据源");
+assert.ok(!fs.existsSync(path.join(root, "system-function-graph.json")), "已移除的示例图不应残留");
 
 assert.match(sourceText, /namespace RelationshipGraphNative/);
 assert.match(sourceText, new RegExp(`AssemblyFileVersion\\("${versionPattern}\\.0"\\)`));
@@ -248,7 +248,6 @@ if (staticOnly) {
     ...sources.map((name) => fs.statSync(path.join(nativeRoot, name)).mtimeMs),
     fs.statSync(path.join(root, "desktop", "build-desktop.ps1")).mtimeMs,
     fs.statSync(manifestPath).mtimeMs,
-    fs.statSync(path.join(root, "system-function-graph.json")).mtimeMs,
     fs.statSync(path.join(root, "assets", "app-icon.ico")).mtimeMs,
   );
   assert.ok(fs.statSync(exe).mtimeMs >= latestInput, "EXE 不是由最新原生源码构建的");

@@ -1,1 +1,0 @@
-importScripts('./routing-core.js');
