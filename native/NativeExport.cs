@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
@@ -71,7 +71,7 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#eef2f6;col
 <header class='head'><h1>" + title + @"</h1><span class='badge'>只读可视图 · 可重新导入关系图编辑器</span><div class='toolbar'>
 <label class='control'><input id='toggleLines' type='checkbox' checked>显示连线</label>
 <select id='theme' title='界面主题'><option value='system'>跟随系统</option><option value='light'>浅色</option><option value='dark'>深色</option></select>
-<select id='direction' title='关系方向'><option value='all'>双向</option><option value='upstream'>上游</option><option value='downstream'>下游</option></select>
+<select id='direction' title='关系方向'><option value='all'>全部</option><option value='upstream'>产出</option><option value='downstream'>消耗</option></select>
 <select id='depth' title='关系层数'><option value='1'>1 层</option><option value='2'>2 层</option><option value='3'>3 层</option></select>
 <button id='zoomOut' title='缩小'>－</button><span id='zoomValue' class='zoom-value'>100%</span><button id='zoomIn' title='放大'>＋</button><button id='fit' title='适合窗口'>适合窗口</button><button id='clear' title='清除高亮'>清除高亮</button>
 </div></header>

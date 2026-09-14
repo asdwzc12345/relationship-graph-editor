@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
@@ -19,6 +19,14 @@ namespace RelationshipGraphNative
 {
     internal static class Program
     {
+        [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Auto)]
+        private static extern IntPtr SendMessage(IntPtr window, int message, IntPtr wParam, IntPtr lParam);
+
+        private static void SendTestMouse(Control control, int message, Point point, bool pressed)
+        {
+            SendMessage(control.Handle, message, new IntPtr(pressed ? 1 : 0), new IntPtr((point.Y << 16) | (point.X & 0xffff)));
+        }
+
         [STAThread]
         private static int Main(string[] args)
         {
@@ -69,6 +77,39 @@ namespace RelationshipGraphNative
                 GraphDocument blank = GraphSerialization.CreateBlank("空白图");
                 Require(blank.groups.Count == 0 && blank.nodes.Count == 0, "无分组空白图失败");
 
+                GraphDocument arrangement = GraphSerialization.CreateBlank("排列测试");
+                arrangement.nodes.Add(new GraphNode { id = "a", x = 0, y = 0, w = 120, h = 50 });
+                arrangement.nodes.Add(new GraphNode { id = "b", x = 170, y = 90, w = 160, h = 80 });
+                arrangement.nodes.Add(new GraphNode { id = "c", x = 600, y = 400, w = 110, h = 60 });
+                arrangement.nodes.Add(new GraphNode { id = "untouched", x = 900, y = 800, w = 120, h = 50 });
+                string[] arrangeIds = { "a", "b", "c" };
+                Require(!GraphSelectionArrangement.Apply(arrangement, new string[] { "a", "b" }, new string[0], SelectionArrangement.Horizontal), "不足三个对象时不应均匀排布");
+                Require(GraphSelectionArrangement.Apply(arrangement, arrangeIds, new string[0], SelectionArrangement.Horizontal), "横向均匀排布未生效");
+                Require(arrangement.nodes[1].x == 280 && arrangement.nodes[0].x == 0 && arrangement.nodes[2].x == 600, "不同宽度的横向间距或两端位置错误");
+                Require(GraphSelectionArrangement.Apply(arrangement, arrangeIds, new string[0], SelectionArrangement.Vertical), "纵向均匀排布未生效");
+                Require(arrangement.nodes[1].y == 185 && arrangement.nodes[2].y == 400, "不同高度的纵向间距或两端位置错误");
+                Require(GraphSelectionArrangement.Apply(arrangement, arrangeIds, new string[0], SelectionArrangement.Bottom), "底对齐未生效");
+                Require(arrangement.nodes.Take(3).All(n => n.y + n.h == 460), "底边未对齐");
+                Require(!GraphSelectionArrangement.Apply(arrangement, arrangeIds, new string[0], SelectionArrangement.Bottom), "重复对齐不应产生修改");
+                Require(GraphSelectionArrangement.Apply(arrangement, arrangeIds, new string[0], SelectionArrangement.HorizontalCenter), "中心对齐未生效");
+                Require(arrangement.nodes.Take(3).All(n => n.y + n.h / 2 == 420), "水平中心线未对齐");
+                Require(arrangement.nodes[3].x == 900 && arrangement.nodes[3].y == 800, "排列误改未选中节点");
+                foreach (SelectionArrangement alignmentMode in new SelectionArrangement[] { SelectionArrangement.Left, SelectionArrangement.Right, SelectionArrangement.VerticalCenter })
+                {
+                    GraphDocument aligned = GraphSerialization.CreateImmutableSnapshot(arrangement);
+                    Require(GraphSelectionArrangement.Apply(aligned, arrangeIds, new string[0], alignmentMode), "新增水平位置对齐未生效");
+                    float expected = alignmentMode == SelectionArrangement.Left ? 0 : alignmentMode == SelectionArrangement.Right ? 710 : 355;
+                    Require(aligned.nodes.Take(3).All(n => Math.Abs((alignmentMode == SelectionArrangement.Left ? n.x : alignmentMode == SelectionArrangement.Right ? n.x + n.w : n.x + n.w / 2) - expected) < .01f), "新增对齐位置错误");
+                    Require(aligned.nodes.Take(3).All(n => n.y + n.h / 2 == 420), "新增对齐意外改变纵向位置");
+                    Require(aligned.nodes[3].x == 900 && aligned.nodes[3].y == 800, "新增对齐误改未选中对象");
+                    Require(!GraphSelectionArrangement.Apply(aligned, arrangeIds, new string[0], alignmentMode), "重复对齐产生无效修改");
+                }
+                arrangement.groups.Add(new GraphGroup { id = "parent", x = 0, y = 0, w = 200, h = 200, groups = new List<string>() });
+                arrangement.nodes[0].groups = new List<string> { "parent" };
+                float memberStart = arrangement.nodes[0].y;
+                Require(GraphSelectionArrangement.Count(arrangement, new string[] { "a", "c" }, new string[] { "parent" }) == 2, "父组和子节点被重复计算");
+                Require(GraphSelectionArrangement.Apply(arrangement, new string[] { "a", "c" }, new string[] { "parent" }, SelectionArrangement.Bottom), "混合选择排列失败");
+                Require(arrangement.nodes[0].y - memberStart == arrangement.groups[0].y, "组内节点未随分组移动或被重复移动");
                 GraphDocument replacementGraph = GraphSerialization.CreateBlank("替换测试");
                 replacementGraph.nodes.Add(new GraphNode { id = "replace_1", label = "Alpha Alpha", type = "alpha 类型", kind = "system", group = "", x = 20, y = 20, w = 150, h = 54, note = "备注 ALPHA" });
                 replacementGraph.nodes.Add(new GraphNode { id = "replace_2", label = "Alpha", type = "步骤", kind = "system", group = "", x = 220, y = 20, w = 150, h = 54, note = "" });
@@ -785,6 +826,50 @@ namespace RelationshipGraphNative
                     Require(wrapCanvas.SelectedType == "group" && wrapCanvas.SelectedId == wrapper.id, "创建包裹分组后未选中新分组");
                 }
 
+                foreach (string releaseOrder in new[] { "normal", "capture_before_up", "capture_without_up", "mouseup_callback", "doubleclick_drag" })
+                foreach (string firstDragType in new[] { "node", "group" })
+                {
+                    GraphDocument firstDragGraph = GraphSerialization.CreateBlank("首次拖动测试");
+                    firstDragGraph.nodes.Add(new GraphNode { id = "first_node", label = "节点", x = 100, y = 100, w = 150, h = 54 });
+                    firstDragGraph.groups.Add(new GraphGroup { id = "first_group", label = "区域", x = 500, y = 100, w = 300, h = 250 });
+                    firstDragGraph.nodes.Add(new GraphNode { id = "member", label = "组内节点", x = 540, y = 180, w = 150, h = 54 });
+                    firstDragGraph = GraphSerialization.Normalize(firstDragGraph);
+                    using (MainForm firstDragWindow = new MainForm(firstDragGraph, false))
+                    {
+                        GraphCanvas firstDragCanvas = firstDragWindow.CanvasForTesting;
+                        firstDragCanvas.Size = new Size(1000, 700); firstDragCanvas.FitToView(); firstDragCanvas.SelectEntity(firstDragType, firstDragType == "node" ? "first_node" : "first_group");
+                        PointF worldStart = firstDragType == "node" ? new PointF(175, 127) : new PointF(520, 120);
+                        Point screenStart = new Point((int)(worldStart.X * firstDragCanvas.Zoom + firstDragCanvas.ViewOffset.X), (int)(worldStart.Y * firstDragCanvas.Zoom + firstDragCanvas.ViewOffset.Y));
+                        Point screenEnd = new Point(screenStart.X + 90, screenStart.Y + 70);
+                        int dragCommits = 0;
+                        firstDragCanvas.GraphCommitted += delegate { dragCommits++; firstDragCanvas.Capture = false; };
+                        if (releaseOrder == "mouseup_callback") firstDragCanvas.MouseUp += delegate { firstDragCanvas.Capture = false; };
+                        SendTestMouse(firstDragCanvas, releaseOrder == "doubleclick_drag" ? 0x0203 : 0x0201, screenStart, true);
+                        SendTestMouse(firstDragCanvas, 0x0200, screenEnd, true);
+                        if (releaseOrder == "capture_before_up" || releaseOrder == "capture_without_up") firstDragCanvas.Capture = false;
+                        if (releaseOrder == "doubleclick_drag") typeof(GraphCanvas).GetMethod("OnMouseDoubleClick", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic).Invoke(firstDragCanvas, new object[] { new MouseEventArgs(MouseButtons.Left, 2, screenEnd.X, screenEnd.Y, 0) });
+                        if (releaseOrder == "capture_without_up") Application.DoEvents();
+                        else SendTestMouse(firstDragCanvas, 0x0202, screenEnd, false);
+                        Application.DoEvents();
+                        Require(dragCommits == 1, "拖动未提交或重复提交：" + releaseOrder + " / " + firstDragType);
+                        GraphDocument movedDocument = firstDragCanvas.Document;
+                        float movedX = firstDragType == "node" ? movedDocument.nodes[0].x : movedDocument.groups[0].x;
+                        float originalX = firstDragType == "node" ? 100 : 500;
+                        Require(movedX > originalX + 20 && movedDocument.edges.Count == 0, "选中对象首次拖动回滚或误建关系：" + firstDragType);
+                        if (firstDragType == "group") Require(Math.Abs(movedDocument.nodes[1].x - 540 - (movedX - 500)) < .1f, "区域首次拖动未带动组内节点");
+                        firstDragWindow.UndoForTesting();
+                        Require(Math.Abs((firstDragType == "node" ? firstDragCanvas.Document.nodes[0].x : firstDragCanvas.Document.groups[0].x) - originalX) < .1f, "首次拖动无法一次撤销");
+                        firstDragWindow.RedoForTesting();
+                        Require(Math.Abs((firstDragType == "node" ? firstDragCanvas.Document.nodes[0].x : firstDragCanvas.Document.groups[0].x) - movedX) < .1f, "首次拖动无法重做");
+                        firstDragCanvas.SelectEntity(firstDragType, firstDragType == "node" ? "first_node" : "first_group");
+                        Point nextStart = new Point((int)((worldStart.X + movedX - originalX) * firstDragCanvas.Zoom + firstDragCanvas.ViewOffset.X), (int)((worldStart.Y + (firstDragType == "node" ? firstDragCanvas.Document.nodes[0].y : firstDragCanvas.Document.groups[0].y) - 100) * firstDragCanvas.Zoom + firstDragCanvas.ViewOffset.Y));
+                        SendTestMouse(firstDragCanvas, 0x0201, nextStart, true);
+                        SendTestMouse(firstDragCanvas, 0x0200, new Point(nextStart.X + 80, nextStart.Y + 60), true);
+                        firstDragCanvas.CancelActiveGesture();
+                        Application.DoEvents();
+                        Require(Math.Abs((firstDragType == "node" ? firstDragCanvas.Document.nodes[0].x : firstDragCanvas.Document.groups[0].x) - movedX) < .1f && dragCommits == 1, "显式取消未恢复位置或产生多余提交");
+                    }
+                }
                 GraphDocument alignmentGraph = GraphSerialization.CreateBlank("节点自动对齐测试");
                 alignmentGraph.nodes.Add(new GraphNode { id = "moving", label = "移动节点", type = "步骤", kind = "system", group = "", x = 100, y = 100, w = 150, h = 54, note = "" });
                 alignmentGraph.nodes.Add(new GraphNode { id = "stationary", label = "参照节点", type = "步骤", kind = "resource", group = "", x = 330, y = 100, w = 150, h = 54, note = "" });
@@ -812,6 +897,31 @@ namespace RelationshipGraphNative
                     Require(Single.IsNaN(alignmentCanvas.AlignmentGuideXForTesting) && Single.IsNaN(alignmentCanvas.AlignmentGuideYForTesting), "自由摆放时仍显示对齐参考线");
                 }
 
+                using (GraphCanvas distanceCanvas = new GraphCanvas())
+                {
+                    GraphDocument distanceGraph = GraphSerialization.Clone(alignmentGraph);
+                    distanceGraph.nodes[0].x = 100; distanceGraph.nodes[0].y = 100;
+                    distanceCanvas.Size = new System.Drawing.Size(900, 650); distanceCanvas.Document = distanceGraph;
+                    distanceCanvas.EditMode = true; distanceCanvas.FitToView(); distanceCanvas.SelectEntity("node", "moving");
+                    distanceCanvas.MoveSelectedNodesForTesting(0, 0, false);
+                    Require(Math.Abs(distanceCanvas.HorizontalAlignmentDistanceForTesting - 80) < .1f, "两个同高方块对齐时未显示水平边缘间距");
+                    distanceCanvas.MoveSelectedNodesForTesting(20, 0, false);
+                    Require(Math.Abs(distanceCanvas.HorizontalAlignmentDistanceForTesting - 60) < .1f, "拖动时对齐距离没有实时更新");
+                    distanceCanvas.MoveSelectedNodesForTesting(0, 0, true);
+                    Require(Single.IsNaN(distanceCanvas.HorizontalAlignmentDistanceForTesting), "自由拖动仍显示距离");
+                    distanceGraph.nodes[0].x = 100; distanceGraph.nodes[0].y = 100;
+                    distanceGraph.nodes[1].x = 100; distanceGraph.nodes[1].y = 300;
+                    distanceCanvas.RefreshDocument(); distanceCanvas.MoveSelectedNodesForTesting(0, 0, false);
+                    Require(Math.Abs(distanceCanvas.VerticalAlignmentDistanceForTesting - 146) < .1f, "上下对齐方块未显示垂直边缘间距");
+                    using (System.Drawing.Bitmap distanceBitmap = new System.Drawing.Bitmap(900, 650))
+                    using (System.Drawing.Graphics distanceGraphics = System.Drawing.Graphics.FromImage(distanceBitmap))
+                        typeof(GraphCanvas).GetMethod("DrawAlignmentDistances", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic).Invoke(distanceCanvas, new object[] { distanceGraphics, 1f });
+                    typeof(GraphCanvas).GetMethod("EndGesture", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic).Invoke(distanceCanvas, new object[0]);
+                    Require(Single.IsNaN(distanceCanvas.VerticalAlignmentDistanceForTesting), "结束拖动后距离标注未清除");
+                    distanceGraph.nodes[1].y = 120;
+                    distanceCanvas.RefreshDocument(); distanceCanvas.MoveSelectedNodesForTesting(0, 0, false);
+                    Require(Single.IsNaN(distanceCanvas.VerticalAlignmentDistanceForTesting), "重叠方块不应显示负间距");
+                }
                 GraphDocument spacingGraph = GraphSerialization.CreateBlank("等间距吸附测试");
                 spacingGraph.nodes.Add(new GraphNode { id = "spacing_a", label = "节点 A", type = "步骤", kind = "system", group = "", x = 100, y = 100, w = 150, h = 54, note = "" });
                 spacingGraph.nodes.Add(new GraphNode { id = "spacing_b", label = "节点 B", type = "步骤", kind = "resource", group = "", x = 300, y = 100, w = 150, h = 54, note = "" });
@@ -848,9 +958,22 @@ namespace RelationshipGraphNative
                 {
                     mixedAlignmentCanvas.Size = new System.Drawing.Size(900, 650); mixedAlignmentCanvas.Document = mixedAlignmentGraph; mixedAlignmentCanvas.EditMode = true; mixedAlignmentCanvas.SelectEntity("node", "alignment_node");
                     mixedAlignmentCanvas.MoveSelectedNodesForTesting(227, 0, false);
-                    Require(Math.Abs(mixedAlignmentGraph.nodes[0].x - 330) < .1f && Math.Abs(mixedAlignmentCanvas.AlignmentGuideXForTesting - 330) < .1f, "节点未能与分组边缘对齐");
+                    Require(Single.IsNaN(mixedAlignmentCanvas.AlignmentGuideXForTesting) && Single.IsNaN(mixedAlignmentCanvas.AlignmentGuideYForTesting), "方块仍被分组边缘吸附");
+                    Require(Single.IsNaN(mixedAlignmentCanvas.HorizontalAlignmentDistanceForTesting) && Single.IsNaN(mixedAlignmentCanvas.VerticalAlignmentDistanceForTesting), "方块仍显示与分组的距离提示");
                 }
 
+                GraphDocument nodeOnlySpacing = GraphSerialization.CreateBlank("方块等距排除分组");
+                nodeOnlySpacing.groups.Add(new GraphGroup { id = "ignore_a", label = "分组A", x = 100, y = 100, w = 220, h = 150 });
+                nodeOnlySpacing.groups.Add(new GraphGroup { id = "ignore_b", label = "分组B", x = 370, y = 100, w = 220, h = 150 });
+                nodeOnlySpacing.nodes.Add(new GraphNode { id = "moving_only", label = "方块", x = 800, y = 100, w = 150, h = 54 });
+                nodeOnlySpacing = GraphSerialization.Normalize(nodeOnlySpacing);
+                using (GraphCanvas nodeOnlyCanvas = new GraphCanvas())
+                {
+                    nodeOnlyCanvas.Document = nodeOnlySpacing; nodeOnlyCanvas.EditMode = true; nodeOnlyCanvas.SelectEntity("node", "moving_only");
+                    nodeOnlyCanvas.MoveSelectedNodesForTesting(-158, 0, false);
+                    Require(!nodeOnlyCanvas.HorizontalSpacingHintActiveForTesting && !nodeOnlyCanvas.VerticalSpacingHintActiveForTesting, "方块仍与两个分组形成等距吸附");
+                    Require(Single.IsNaN(nodeOnlyCanvas.AlignmentGuideYForTesting), "方块仍与分组同高吸附");
+                }
                 GraphDocument mixedSpacingGraph = GraphSerialization.CreateBlank("节点与分组混合等间距测试");
                 mixedSpacingGraph.groups.Add(new GraphGroup { id = "spacing_group_a", label = "分组 A", x = 100, y = 100, w = 150, h = 100 });
                 mixedSpacingGraph.groups.Add(new GraphGroup { id = "spacing_group_moving", label = "移动分组", x = 700, y = 100, w = 150, h = 100 });
@@ -972,7 +1095,7 @@ namespace RelationshipGraphNative
                     Require(automaticLayout.TryGetEdge(edgeId, out route), "自动路由遗漏同源关系：" + edgeId);
                     Require(route.SourceSide == "right", "从左到右排版未从起点右侧出线：" + edgeId);
                     for (int portIndex = 0; portIndex < fanOutPorts.Count; portIndex++)
-                        Require(!PointsClose(fanOutPorts[portIndex], route.SourcePoint), "同端口多条关系仍使用同一个端口点");
+                        Require(PointsClose(fanOutPorts[portIndex], route.SourcePoint), "同源分支没有共用中心出线点");
                     fanOutPorts.Add(route.SourcePoint);
                 }
 
@@ -1034,6 +1157,100 @@ namespace RelationshipGraphNative
                 GraphDocument autoLineRoundTrip = GraphSerialization.LoadFile(autoLineDrawioPath, out autoLineNotice);
                 Require(autoLineRoundTrip.edges.Any(delegate(GraphEdge edge) { return edge.id == "style_auto_edge" && edge.lineType == "auto"; }), "Draw.io 往返未保留自动避障线型");
 
+                foreach (int branchCount in new[] { 2, 3 })
+                {
+                    GraphDocument branches = GraphSerialization.CreateBlank("共线分支测试");
+                    branches.nodes.Add(new GraphNode { id = "origin", label = "起点", x = 100, y = 200, w = 150, h = 54 });
+                    for (int branchIndex = 0; branchIndex < branchCount; branchIndex++)
+                    {
+                        branches.nodes.Add(new GraphNode { id = "branch" + branchIndex, label = "目标", x = 290, y = 100 + 100 * branchIndex, w = 150, h = 54 });
+                        branches.edges.Add(new GraphEdge { id = "branch_edge" + branchIndex, source = "origin", target = "branch" + branchIndex, sourceType = "node", targetType = "node", lineType = "auto", label = "" });
+                    }
+                    branches = GraphSerialization.Normalize(branches);
+                    GraphLayoutResult branchLayout = GraphLayout.CalculateRoutes(branches);
+                    GraphEdgeLayout directBranch;
+                    Require(branchLayout.TryGetEdge("branch_edge1", out directBranch) && directBranch.Points.Count == 2 && directBranch.BendCount == 0, "同高目标因多分支或短间距产生多余弯折");
+                    foreach (GraphEdgeLayout branchRoute in branchLayout.Edges.Values)
+                    {
+                        Require(PointsClose(branchRoute.SourcePoint, directBranch.SourcePoint), "分支未共享起点");
+                        Require(!branchRoute.HasObstacleConflict && RouteIsOrthogonal(branchRoute.Points), "共线分支路径存在冲突");
+                        if (branchRoute.EdgeId != "branch_edge1")
+                        {
+                            Require(branchRoute.Points.Count == 4 && Math.Abs(branchRoute.Points[1].X - 270) < .01f && Math.Abs(branchRoute.Points[1].Y - directBranch.SourcePoint.Y) < .01f, "分支没有先共线再从中间转向");
+                        }
+                        foreach (GraphNode branchNode in branches.nodes)
+                            Require(!RouteCrossesRectangleInterior(branchRoute.Points, new RectangleF(branchNode.x, branchNode.y, branchNode.w, branchNode.h)), "共线分支穿过方块");
+                    }
+                }
+                foreach (bool reverseEdges in new[] { false, true })
+                {
+                    GraphDocument separateOrigins = GraphSerialization.CreateBlank("不同来源避免共线");
+                    separateOrigins.nodes.Add(new GraphNode { id = "once", label = "一次性奖励", x = 100, y = 100, w = 150, h = 54 });
+                    separateOrigins.nodes.Add(new GraphNode { id = "daily", label = "每日奖励", x = 100, y = 200, w = 150, h = 54 });
+                    separateOrigins.nodes.Add(new GraphNode { id = "money", label = "元宝", x = 290, y = 200, w = 150, h = 54 });
+                    separateOrigins.nodes.Add(new GraphNode { id = "energy", label = "体力", x = 290, y = 300, w = 150, h = 54 });
+                    separateOrigins.edges.Add(new GraphEdge { id = "once_money", source = "once", target = "money", sourceType = "node", targetType = "node", lineType = "auto" });
+                    separateOrigins.edges.Add(new GraphEdge { id = "daily_money", source = "daily", target = "money", sourceType = "node", targetType = "node", lineType = "auto" });
+                    separateOrigins.edges.Add(new GraphEdge { id = "daily_energy", source = "daily", target = "energy", sourceType = "node", targetType = "node", lineType = "auto" });
+                    // Also cover two origins whose vertical trunks would overlap for a long distance.
+                    separateOrigins.edges.Add(new GraphEdge { id = "once_energy", source = "once", target = "energy", sourceType = "node", targetType = "node", lineType = "auto" });
+                    if (reverseEdges) separateOrigins.edges.Reverse();
+                    separateOrigins = GraphSerialization.Normalize(separateOrigins);
+                    GraphLayoutResult separated = GraphLayout.CalculateRoutes(separateOrigins);
+                    Require(separated.Edges["daily_money"].Points.Count == 2, "分离其他来源后破坏同高直连");
+                    Require(!PointsClose(separated.Edges["once_money"].TargetPoint, separated.Edges["daily_money"].TargetPoint), "不同来源仍共用目标入口");
+                    foreach (GraphEdge firstEdge in separateOrigins.edges)
+                    {
+                        GraphEdgeLayout firstRoute = separated.Edges[firstEdge.id];
+                        Require(!firstRoute.HasObstacleConflict && RouteIsOrthogonal(firstRoute.Points), "来源分离破坏避障或正交路径");
+                        foreach (GraphEdge secondEdge in separateOrigins.edges)
+                        {
+                            if (firstEdge.source == secondEdge.source) continue;
+                            GraphEdgeLayout secondRoute = separated.Edges[secondEdge.id];
+                            for (int i = 1; i < firstRoute.Points.Count; i++)
+                                for (int j = 1; j < secondRoute.Points.Count; j++)
+                                {
+                                    PointF a = firstRoute.Points[i - 1], b = firstRoute.Points[i], c = secondRoute.Points[j - 1], d = secondRoute.Points[j];
+                                    bool sharedHorizontal = Math.Abs(a.Y - b.Y) < .01f && Math.Abs(c.Y - d.Y) < .01f && Math.Abs(a.Y - c.Y) < .01f && Math.Min(Math.Max(a.X, b.X), Math.Max(c.X, d.X)) > Math.Max(Math.Min(a.X, b.X), Math.Min(c.X, d.X)) + .01f;
+                                    bool sharedVertical = Math.Abs(a.X - b.X) < .01f && Math.Abs(c.X - d.X) < .01f && Math.Abs(a.X - c.X) < .01f && Math.Min(Math.Max(a.Y, b.Y), Math.Max(c.Y, d.Y)) > Math.Max(Math.Min(a.Y, b.Y), Math.Min(c.Y, d.Y)) + .01f;
+                                    Require(!sharedHorizontal && !sharedVertical, "不同来源连线仍存在有歧义的共线段");
+                                }
+                        }
+                    }
+                }
+                foreach (bool reverseCrossings in new[] { false, true })
+                {
+                    GraphDocument crossingGraph = GraphSerialization.CreateBlank("交叉避让测试");
+                    crossingGraph.nodes.Add(new GraphNode { id = "ad", label = "IAA", x = 0, y = 0, w = 150, h = 54 });
+                    crossingGraph.nodes.Add(new GraphNode { id = "recipe", label = "甜品配方", x = 0, y = 100, w = 150, h = 54 });
+                    crossingGraph.nodes.Add(new GraphNode { id = "speed", label = "甜品研究加速", x = 190, y = 100, w = 150, h = 54 });
+                    crossingGraph.nodes.Add(new GraphNode { id = "research", label = "研究", x = 190, y = 200, w = 150, h = 54 });
+                    crossingGraph.edges.Add(new GraphEdge { id = "ad_speed", source = "ad", target = "speed", sourceType = "node", targetType = "node", lineType = "auto" });
+                    crossingGraph.edges.Add(new GraphEdge { id = "recipe_research", source = "recipe", target = "research", sourceType = "node", targetType = "node", lineType = "auto" });
+                    if (reverseCrossings) crossingGraph.edges.Reverse();
+                    crossingGraph = GraphSerialization.Normalize(crossingGraph);
+                    string beforeCrossing = GraphSerialization.Serialize(crossingGraph, false);
+                    GraphLayoutResult crossingResult = GraphLayout.CalculateRoutes(crossingGraph);
+                    Require(beforeCrossing == GraphSerialization.Serialize(crossingGraph, false), "避让交叉改变了方块位置或关系数据");
+                    IList<PointF> firstCrossing = crossingResult.Edges["ad_speed"].Points, secondCrossing = crossingResult.Edges["recipe_research"].Points;
+                    for (int i = 1; i < firstCrossing.Count; i++)
+                        for (int j = 1; j < secondCrossing.Count; j++)
+                        {
+                            PointF a = firstCrossing[i - 1], b = firstCrossing[i], c = secondCrossing[j - 1], d = secondCrossing[j];
+                            bool horizontal = Math.Abs(a.Y - b.Y) < .01f;
+                            if (horizontal == (Math.Abs(c.Y - d.Y) < .01f)) continue;
+                            PointF hit = horizontal ? new PointF(c.X, a.Y) : new PointF(a.X, c.Y);
+                            bool intersects = hit.X >= Math.Min(a.X, b.X) - .01f && hit.X <= Math.Max(a.X, b.X) + .01f && hit.Y >= Math.Min(a.Y, b.Y) - .01f && hit.Y <= Math.Max(a.Y, b.Y) + .01f
+                                && hit.X >= Math.Min(c.X, d.X) - .01f && hit.X <= Math.Max(c.X, d.X) + .01f && hit.Y >= Math.Min(c.Y, d.Y) - .01f && hit.Y <= Math.Max(c.Y, d.Y) + .01f;
+                            Require(!intersects, "截图类型的折线交叉没有避开");
+                        }
+                    foreach (GraphEdgeLayout crossingRoute in crossingResult.Edges.Values)
+                    {
+                        Require(!crossingRoute.HasObstacleConflict && RouteIsOrthogonal(crossingRoute.Points), "减少交叉破坏了避障路线");
+                        foreach (GraphNode crossingNode in crossingGraph.nodes)
+                            Require(!RouteCrossesRectangleInterior(crossingRoute.Points, new RectangleF(crossingNode.x, crossingNode.y, crossingNode.w, crossingNode.h)), "避线时穿过了方块");
+                    }
+                }
                 GraphDocument routeOnlyGraph = GraphSerialization.CreateBlank("仅路由保留边界测试");
                 routeOnlyGraph.groups.Add(new GraphGroup { id = "route_group", label = "保留分组", x = -180.25f, y = 65.5f, w = 520.75f, h = 310.25f });
                 routeOnlyGraph.nodes.Add(new GraphNode { id = "route_left", label = "左侧", type = "步骤", kind = "system", group = "", x = -120.5f, y = 130.25f, w = 137.5f, h = 51.25f, note = "" });

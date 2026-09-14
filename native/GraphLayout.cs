@@ -1,5 +1,6 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Drawing;
 
 namespace RelationshipGraphNative
@@ -639,6 +640,7 @@ namespace RelationshipGraphNative
                     }
                     RouteEdge(_edgeWork[index]);
                 }
+                foreach (EdgeWork work in _edgeWork) { _options.ThrowIfCancellationRequested(); ReduceCrossings(work); }
             }
 
             private void BuildEdgeWork()
@@ -732,7 +734,21 @@ namespace RelationshipGraphNative
                         PortRequest request = list[index];
                         RectangleF bounds = request.Source ? request.Work.SourceBounds : request.Work.TargetBounds;
                         string side = request.Source ? request.Work.SourceSide : request.Work.TargetSide;
-                        PointF point = DistributedPortPoint(bounds, side, index, list.Count);
+                        PointF point = SharedPortPoint(bounds, side);
+                        // Preserve a shared trunk only for the same origin. Other origins
+                        // receive separate entry points, keeping the best aligned one centered.
+                        List<string> origins = list.Select(item => item.Work.SourceKey).Distinct().ToList();
+                        if (origins.Count > 1)
+                        {
+                            float center = side == "left" || side == "right" ? bounds.Top + bounds.Height / 2f : bounds.Left + bounds.Width / 2f;
+                            PortRequest anchor = list.OrderBy(item => Math.Abs(item.OppositeCoordinate - center)).First();
+                            int anchorIndex = origins.IndexOf(anchor.Work.SourceKey);
+                            int rank = origins.IndexOf(request.Work.SourceKey) - anchorIndex;
+                            float length = side == "left" || side == "right" ? bounds.Height : bounds.Width;
+                            float step = Math.Min(14f, Math.Max(0f, length / 2f - 6f) / Math.Max(1, Math.Max(anchorIndex, origins.Count - 1 - anchorIndex)));
+                            if (side == "left" || side == "right") point.Y += rank * step;
+                            else point.X += rank * step;
+                        }
                         if (request.Source)
                         {
                             request.Work.SourcePoint = point;
@@ -765,25 +781,127 @@ namespace RelationshipGraphNative
                 list.Add(request);
             }
 
-            private PointF DistributedPortPoint(RectangleF bounds, string side, int index, int count)
+            private static PointF SharedPortPoint(RectangleF bounds, string side)
             {
-                bool verticalSide = side == "left" || side == "right";
-                float length = verticalSide ? bounds.Height : bounds.Width;
-                float corner = Math.Min(Math.Max(0f, _options.PortCornerPadding), Math.Max(0f, length / 2f - 1f));
-                float usable = Math.Max(0f, length - corner * 2f);
-                float coordinate;
-                if (count <= 1 || usable <= Epsilon) coordinate = length / 2f;
-                else
-                {
-                    float span = Math.Min(usable, SafePositive(_options.PortSpacing, 14f) * (count - 1));
-                    coordinate = (length - span) / 2f + span * index / (count - 1);
-                }
-                if (side == "left") return new PointF(bounds.Left, bounds.Top + coordinate);
-                if (side == "right") return new PointF(bounds.Right, bounds.Top + coordinate);
-                if (side == "top") return new PointF(bounds.Left + coordinate, bounds.Top);
-                return new PointF(bounds.Left + coordinate, bounds.Bottom);
+                // A side has one shared center port; branches may share their trunk.
+                if (side == "left") return new PointF(bounds.Left, bounds.Top + bounds.Height / 2f);
+                if (side == "right") return new PointF(bounds.Right, bounds.Top + bounds.Height / 2f);
+                if (side == "top") return new PointF(bounds.Left + bounds.Width / 2f, bounds.Top);
+                return new PointF(bounds.Left + bounds.Width / 2f, bounds.Bottom);
             }
 
+            private List<PointF> SharedBranchPath(EdgeWork work, List<Obstacle> obstacles)
+            {
+                PointF source = work.SourcePoint, target = work.TargetPoint;
+                for (int lane = 0; lane < 17; lane++)
+                {
+                float fraction = lane == 0 ? .5f : lane == 1 ? .25f : lane == 2 ? .75f : .5f + ((lane % 2 == 1 ? -1 : 1) * ((lane + 1) / 2) / 18f);
+                List<PointF> points = null;
+                if ((work.SourceSide == "right" && work.TargetSide == "left" && target.X > source.X)
+                    || (work.SourceSide == "left" && work.TargetSide == "right" && target.X < source.X))
+                {
+                    float middle = source.X + (target.X - source.X) * fraction;
+                    points = new List<PointF>(new[] { source, new PointF(middle, source.Y), new PointF(middle, target.Y), target });
+                }
+                else if ((work.SourceSide == "bottom" && work.TargetSide == "top" && target.Y > source.Y)
+                    || (work.SourceSide == "top" && work.TargetSide == "bottom" && target.Y < source.Y))
+                {
+                    float middle = source.Y + (target.Y - source.Y) * fraction;
+                    points = new List<PointF>(new[] { source, new PointF(source.X, middle), new PointF(target.X, middle), target });
+                }
+                if (points == null) return null;
+                points = SimplifyPath(points);
+                if (PathClear(points, obstacles) && !HasAmbiguousOverlap(work, points)) return points;
+                }
+                return null;
+            }
+            private bool HasAmbiguousOverlap(EdgeWork work, IList<PointF> points)
+            {
+                foreach (EdgeWork other in _edgeWork)
+                {
+                    if (other == work || other.Route == null || other.SourceKey == work.SourceKey) continue;
+                    for (int i = 1; i < points.Count; i++)
+                        for (int j = 1; j < other.Route.Points.Count; j++)
+                        {
+                            PointF a = points[i - 1], b = points[i], c = other.Route.Points[j - 1], d = other.Route.Points[j];
+                            bool horizontal = Math.Abs(a.Y - b.Y) < Epsilon && Math.Abs(c.Y - d.Y) < Epsilon && Math.Abs(a.Y - c.Y) < Epsilon;
+                            bool vertical = Math.Abs(a.X - b.X) < Epsilon && Math.Abs(c.X - d.X) < Epsilon && Math.Abs(a.X - c.X) < Epsilon;
+                            if (horizontal && Math.Min(Math.Max(a.X, b.X), Math.Max(c.X, d.X)) - Math.Max(Math.Min(a.X, b.X), Math.Min(c.X, d.X)) > Epsilon) return true;
+                            if (vertical && Math.Min(Math.Max(a.Y, b.Y), Math.Max(c.Y, d.Y)) - Math.Max(Math.Min(a.Y, b.Y), Math.Min(c.Y, d.Y)) > Epsilon) return true;
+                        }
+                }
+                return false;
+            }
+            private int CrossingCount(EdgeWork work, IList<PointF> points)
+            {
+                int count = 0;
+                foreach (EdgeWork other in _edgeWork)
+                {
+                    if (other == work || other.Route == null || other.SourceKey == work.SourceKey) continue;
+                    IList<PointF> line = other.Route.Points;
+                    for (int i = 1; i < points.Count; i++)
+                        for (int j = 1; j < line.Count; j++)
+                        {
+                            PointF a = points[i - 1], b = points[i], c = line[j - 1], d = line[j];
+                            bool horizontal = Math.Abs(a.Y - b.Y) < Epsilon;
+                            if (horizontal == (Math.Abs(c.Y - d.Y) < Epsilon)) continue;
+                            PointF intersection = horizontal ? new PointF(c.X, a.Y) : new PointF(a.X, c.Y);
+                            if (intersection.X < Math.Min(a.X, b.X) - Epsilon || intersection.X > Math.Max(a.X, b.X) + Epsilon || intersection.Y < Math.Min(a.Y, b.Y) - Epsilon || intersection.Y > Math.Max(a.Y, b.Y) + Epsilon
+                                || intersection.X < Math.Min(c.X, d.X) - Epsilon || intersection.X > Math.Max(c.X, d.X) + Epsilon || intersection.Y < Math.Min(c.Y, d.Y) - Epsilon || intersection.Y > Math.Max(c.Y, d.Y) + Epsilon) continue;
+                            if ((SamePoint(intersection, points[0]) || SamePoint(intersection, points[points.Count - 1])) && (SamePoint(intersection, line[0]) || SamePoint(intersection, line[line.Count - 1]))) continue;
+                            count++;
+                        }
+                }
+                return count;
+            }
+
+            private void ReduceCrossings(EdgeWork work)
+            {
+                GraphEdgeLayout route = work.Route;
+                if (route == null || route.Points.Count == 2 || route.HasObstacleConflict || CrossingCount(work, route.Points) == 0) return;
+                List<Obstacle> obstacles = ObstaclesFor(work);
+                foreach (EdgeWork other in _edgeWork)
+                {
+                    if (other == work || other.Route == null || other.SourceKey == work.SourceKey) continue;
+                    for (int i = 1; i < other.Route.Points.Count; i++)
+                    {
+                        PointF a = other.Route.Points[i - 1], b = other.Route.Points[i];
+                        RectangleF barrier = RectangleF.FromLTRB(Math.Min(a.X, b.X), Math.Min(a.Y, b.Y), Math.Max(a.X, b.X), Math.Max(a.Y, b.Y));
+                        barrier.Inflate(5f, 5f);
+                        obstacles.Add(new Obstacle("line:" + other.Edge.id + ":" + i, barrier, false));
+                    }
+                }
+                string[] sourceSides = new[] { work.SourceSide, "right", "bottom", "left", "top" }.Distinct().ToArray();
+                string[] targetSides = new[] { work.TargetSide, "left", "top", "right", "bottom" }.Distinct().ToArray();
+                List<PointF> best = null;
+                string bestSource = work.SourceSide, bestTarget = work.TargetSide;
+                float bestScore = Single.MaxValue;
+                foreach (string sourceSide in sourceSides)
+                    foreach (string targetSide in targetSides)
+                    {
+                        _options.ThrowIfCancellationRequested();
+                        PointF source = sourceSide == work.SourceSide ? work.SourcePoint : SharedPortPoint(work.SourceBounds, sourceSide);
+                        PointF target = targetSide == work.TargetSide ? work.TargetPoint : SharedPortPoint(work.TargetBounds, targetSide);
+                        PointF start = OffsetBySide(source, sourceSide, 12f), end = OffsetBySide(target, targetSide, 12f);
+                        if (!SegmentClear(source, start, obstacles) || !SegmentClear(end, target, obstacles)) continue;
+                        // A bounded candidate search keeps dense graphs responsive.
+                        List<PointF> core = FindCandidatePath(start, end, obstacles);
+                        if (core == null) continue;
+                        List<PointF> candidate = new List<PointF>(); candidate.Add(source); AppendWithoutDuplicate(candidate, core); candidate.Add(target);
+                        candidate = SimplifyPath(candidate);
+                        if (!PathClear(candidate, obstacles) || HasAmbiguousOverlap(work, candidate) || CrossingCount(work, candidate) != 0) continue;
+                        float score = PathLength(candidate) + candidate.Count * 18f + (sourceSide == work.SourceSide ? 0 : 12f) + (targetSide == work.TargetSide ? 0 : 12f);
+                        if (score < bestScore) { best = candidate; bestScore = score; bestSource = sourceSide; bestTarget = targetSide; }
+                    }
+                if (best == null) return;
+                route.Points.Clear(); foreach (PointF point in best) route.Points.Add(point);
+                route.SourceSide = bestSource; route.TargetSide = bestTarget;
+                route.SourcePoint = best[0]; route.TargetPoint = best[best.Count - 1];
+                if (bestSource != work.SourceSide) { route.SourcePortIndex = 0; route.SourcePortCount = 1; }
+                if (bestTarget != work.TargetSide) { route.TargetPortIndex = 0; route.TargetPortCount = 1; }
+                work.SourceSide = bestSource; work.TargetSide = bestTarget; work.SourcePoint = route.SourcePoint; work.TargetPoint = route.TargetPoint;
+                route.Length = PathLength(best); route.BendCount = Math.Max(0, best.Count - 2);
+            }
             private void BuildRoutingObstacles()
             {
                 foreach (KeyValuePair<string, RectangleF> pair in Result.NodeBounds)
@@ -809,6 +927,8 @@ namespace RelationshipGraphNative
                 AppendWithoutDuplicate(points, core);
                 if (!SamePoint(targetStub, work.TargetPoint)) points.Add(work.TargetPoint);
                 points = SimplifyPath(points);
+                List<PointF> sharedBranch = SharedBranchPath(work, obstacles);
+                if (sharedBranch != null) { points = sharedBranch; safe = true; }
                 safe = safe && PathClear(points, obstacles);
 
                 GraphEdgeLayout route = new GraphEdgeLayout();

@@ -190,7 +190,7 @@ assert.match(graphCanvasText, /DrawMiniMap/);
 assert.match(graphCanvasText, /EnsureEntityVisible/);
 assert.match(graphCanvasText, /BeginSelectedLabelEdit/);
 assert.match(graphCanvasText, /GraphCanvasAccessibleObject/);
-assert.match(mainFormText, /RunAutomaticLayout/);
+assert.doesNotMatch(mainFormText, /RunAutomaticLayout|自动排版|Ctrl\+Shift\+L/);
 assert.match(mainFormText, /SaveJson\(true\)/);
 assert.match(mainFormText, /RecentFileStore/);
 assert.match(mainFormText, /SwapSelectedEdgeDirection/);

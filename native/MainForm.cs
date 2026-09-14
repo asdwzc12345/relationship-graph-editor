@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
@@ -28,6 +28,7 @@ namespace RelationshipGraphNative
         private readonly ToolStripComboBox _depthBox = new ToolStripComboBox();
         private readonly ToolStripComboBox _themeBox = new ToolStripComboBox();
         private readonly ToolStripTextBox _searchBox = new ToolStripTextBox();
+        private readonly List<ToolStripItem> _arrangementItems = new List<ToolStripItem>();
         private readonly GraphHistory _undo = new GraphHistory();
         private readonly GraphHistory _redo = new GraphHistory();
         private readonly Timer _inspectorSaveTimer = new Timer();
@@ -196,7 +197,7 @@ namespace RelationshipGraphNative
 
         private MenuStrip BuildMenu()
         {
-            MenuStrip menu = new MenuStrip();
+            MenuStrip menu = new MenuStrip(); menu.ShowItemToolTips = true;
             ToolStripMenuItem file = new ToolStripMenuItem("文件(&F)");
             file.DropDownItems.Add(MenuItem("新建关系图", Keys.Control | Keys.N, NewRelationshipGraph));
             file.DropDownItems.Add(MenuItem("新建流程图", Keys.Control | Keys.Shift | Keys.N, NewFlowchart));
@@ -236,8 +237,11 @@ namespace RelationshipGraphNative
             edit.DropDownItems.Add(MenuItem("新增关系…", Keys.Control | Keys.L, AddRelation));
             edit.DropDownItems.Add(MenuItem("删除选中项", Keys.Delete, DeleteSelected));
 
+            ToolStripMenuItem arrange = new ToolStripMenuItem("排列"); arrange.DropDown.ShowItemToolTips = true;
+            AddArrangementItems(arrange.DropDownItems, true);
+
+
             ToolStripMenuItem view = new ToolStripMenuItem("视图(&V)");
-            view.DropDownItems.Add(MenuItem("自动排版", Keys.Control | Keys.Shift | Keys.L, RunAutomaticLayout));
             view.DropDownItems.Add(new ToolStripSeparator());
             view.DropDownItems.Add(MenuItem("适合窗口", Keys.Control | Keys.D0, delegate { _canvas.FitToView(); }));
             view.DropDownItems.Add(MenuItem("放大", Keys.Control | Keys.Oemplus, delegate { _canvas.ZoomBy(1.18f); }));
@@ -257,14 +261,14 @@ namespace RelationshipGraphNative
             ToolStripMenuItem help = new ToolStripMenuItem("帮助(&H)");
             help.DropDownItems.Add(MenuItem("操作说明", Keys.F1, ShowHelp));
             help.DropDownItems.Add(MenuItem("关于", Keys.None, ShowAbout));
-            menu.Items.Add(file); menu.Items.Add(edit); menu.Items.Add(view); menu.Items.Add(help);
+            menu.Items.Add(file); menu.Items.Add(edit); menu.Items.Add(arrange); menu.Items.Add(view); menu.Items.Add(help);
             return menu;
         }
 
         private ToolStrip BuildToolbar()
         {
             ToolStrip tools = new ToolStrip();
-            tools.GripStyle = ToolStripGripStyle.Hidden;
+            tools.GripStyle = ToolStripGripStyle.Hidden; tools.ImageScalingSize = new Size(24, 24);
             tools.Padding = new Padding(10, 7, 10, 7);
             tools.AutoSize = true;
             tools.LayoutStyle = ToolStripLayoutStyle.HorizontalStackWithOverflow;
@@ -272,12 +276,10 @@ namespace RelationshipGraphNative
 
             ToolStripButton addGroup = new ToolStripButton("＋分组"); addGroup.Click += delegate { AddGroup(); };
             ToolStripButton addNode = new ToolStripButton("＋节点"); addNode.Click += delegate { if (!IsFlowchart) AddNode(); else _statusText.Text = "请从左侧组件库选择或拖入流程图形"; };
-            ToolStripButton autoLayout = new ToolStripButton("自动排版"); autoLayout.Click += delegate { RunAutomaticLayout(); };
             ToolStripButton fit = new ToolStripButton("适合窗口"); fit.Click += delegate { _canvas.FitToView(); };
             ToolStripButton zoomOut = new ToolStripButton("－"); zoomOut.Click += delegate { _canvas.ZoomBy(.85f); };
             ToolStripButton zoomIn = new ToolStripButton("＋"); zoomIn.Click += delegate { _canvas.ZoomBy(1.18f); };
             addGroup.AccessibleName = "新增分组"; addNode.AccessibleName = "新增节点";
-            autoLayout.AccessibleName = "自动排版"; autoLayout.ToolTipText = "分层排列并自动避让连线与标签（Ctrl+Shift+L）";
             fit.AccessibleName = "适合窗口"; zoomOut.AccessibleName = "缩小画布"; zoomIn.AccessibleName = "放大画布";
             addGroup.ToolTipText = "在视野中心新增分组"; addNode.ToolTipText = "在视野中心新增节点";
             fit.ToolTipText = "显示全部内容（Ctrl+0）"; zoomOut.ToolTipText = "缩小"; zoomIn.ToolTipText = "放大";
@@ -288,7 +290,7 @@ namespace RelationshipGraphNative
             _lineTypeBox.SelectedIndexChanged += delegate { _canvas.NewLineType = LineTypeAt(_lineTypeBox.SelectedIndex); };
             _directionBox.AutoSize = false; _directionBox.DropDownStyle = ComboBoxStyle.DropDownList; _directionBox.Width = 112; _directionBox.DropDownWidth = 132;
             _directionBox.AccessibleName = "关系高亮方向";
-            _directionBox.Items.AddRange(new object[] { "上下游", "仅上游", "仅下游" }); _directionBox.SelectedIndex = 0;
+            _directionBox.Items.AddRange(new object[] { "全部", "产出", "消耗" }); _directionBox.SelectedIndex = 0;
             _directionBox.SelectedIndexChanged += delegate { _canvas.FocusDirection = _directionBox.SelectedIndex == 1 ? "upstream" : _directionBox.SelectedIndex == 2 ? "downstream" : "all"; _canvas.Invalidate(); };
             _depthBox.AutoSize = false; _depthBox.DropDownStyle = ComboBoxStyle.DropDownList; _depthBox.Width = 72; _depthBox.DropDownWidth = 86;
             _depthBox.AccessibleName = "关系高亮层数";
@@ -303,7 +305,8 @@ namespace RelationshipGraphNative
             _searchBox.KeyDown += delegate(object sender, KeyEventArgs e) { if (e.KeyCode == Keys.Enter) { FindEntity(); e.SuppressKeyPress = true; } };
 
             tools.Items.Add(_undoButton); tools.Items.Add(_redoButton); tools.Items.Add(new ToolStripSeparator());
-            tools.Items.Add(addGroup); tools.Items.Add(addNode); tools.Items.Add(autoLayout); tools.Items.Add(new ToolStripSeparator());
+            tools.Items.Add(addGroup); tools.Items.Add(addNode); tools.Items.Add(new ToolStripSeparator());
+            AddArrangementItems(tools.Items, false); tools.Items.Add(new ToolStripSeparator());
             tools.Items.Add(new ToolStripLabel("新关系线型")); tools.Items.Add(_lineTypeBox); tools.Items.Add(new ToolStripSeparator());
             tools.Items.Add(new ToolStripLabel("高亮")); tools.Items.Add(_directionBox); tools.Items.Add(_depthBox); tools.Items.Add(new ToolStripSeparator());
             tools.Items.Add(fit); tools.Items.Add(zoomOut); tools.Items.Add(zoomIn); tools.Items.Add(new ToolStripSeparator());
@@ -380,6 +383,12 @@ namespace RelationshipGraphNative
             BackColor = dark ? NativeTheme.DarkBackground : NativeTheme.LightBackground;
             NativeTheme.ApplyControlTree(this, dark);
             NativeTheme.ApplyToolStrip(_menu, dark); NativeTheme.ApplyToolStrip(_tools, dark); NativeTheme.ApplyToolStrip(_status, dark);
+            foreach (ToolStripItem item in _arrangementItems)
+            {
+                Image previousArrangementIcon = item.Image;
+                item.Image = ArrangementIcon.Create((SelectionArrangement)item.Tag, dark);
+                if (previousArrangementIcon != null) previousArrangementIcon.Dispose();
+            }
             if (_split != null)
             {
                 _split.BackColor = dark ? NativeTheme.DarkBorder : Color.FromArgb(215, 222, 230);
@@ -1144,42 +1153,6 @@ namespace RelationshipGraphNative
             if (_redo.Count == 0) return; _undo.Push(_canvas.Document); _canvas.RestoreDocumentPreservingView(_redo.Pop());
             RefreshDirtyFromSavePoint(); bool autosaved = _isDirty ? SaveAutosave() : ClearAutosaveSafely(); ApplyTheme(); RebuildInspector(); UpdateStatus(); QueueRoutingRefresh(); if (autosaved) _statusText.Text = "已重做"; UpdateTitle();
         }
-
-        private void RunAutomaticLayout()
-        {
-            FinishPendingCanvasWork();
-            if (_canvas.Document == null || (_canvas.Document.nodes.Count == 0 && _canvas.Document.groups.Count == 0))
-            {
-                _statusText.Text = "当前关系图没有可排版的对象"; return;
-            }
-            string beforeJson = GraphSerialization.Serialize(_canvas.Document, false);
-            GraphDocument snapshot = GraphSerialization.CreateImmutableSnapshot(_canvas.Document);
-            GraphLayoutResult result = null;
-            StartBackgroundWork("正在自动排版", delegate(BackgroundWorkContext context)
-            {
-                context.ReportProgress(8, "正在分析关系层级…");
-                context.ThrowIfCancellationRequested();
-                GraphLayoutOptions options = GraphLayoutOptions.ForDocument(snapshot);
-                options.CancellationRequested = delegate { return context.IsCancellationRequested; };
-                options.ProgressChanged = delegate(int percentage, string message) { context.ReportProgress(percentage, message); };
-                result = GraphLayout.Calculate(snapshot, options);
-                context.ThrowIfCancellationRequested();
-                context.ReportProgress(100, "排版与避障计算完成，正在更新画布…");
-            }, delegate(BackgroundWorkCompletedEventArgs completed)
-            {
-                if (completed.Cancelled) { _statusText.Text = "自动排版已取消，画布未改变"; return; }
-                if (completed.Error != null) { ShowError("自动排版失败", completed.Error); return; }
-                if (!_canvas.ApplyAutomaticLayout(result, beforeJson)) { _statusText.Text = "自动排版没有生成可应用的结果"; return; }
-                int conflicts = result.Edges.Values.Count(delegate(GraphEdgeLayout edge) { return edge.HasObstacleConflict; });
-                string message = "自动排版完成：端口已错开，连线和标签已避让";
-                if (conflicts > 0) message += "；" + conflicts + " 条关系使用了安全回退路径";
-                if (result.Warnings.Count > 0) message += "；另有 " + result.Warnings.Count + " 条布局提示";
-                _statusText.Text = message;
-                UpdateStatus();
-            });
-        }
-
-        internal void RunAutomaticLayoutForTesting() { RunAutomaticLayout(); }
 
         private void AddGroup()
         {
@@ -1998,7 +1971,7 @@ namespace RelationshipGraphNative
         {
             int incoming = _canvas.Document.edges.Count(delegate(GraphEdge edge) { return edge.targetType == type && edge.target == id; });
             int outgoing = _canvas.Document.edges.Count(delegate(GraphEdge edge) { return edge.sourceType == type && edge.source == id; });
-            return "上游关系 " + incoming + " 条　下游关系 " + outgoing + " 条";
+            return "产出关系 " + incoming + " 条　消耗关系 " + outgoing + " 条";
         }
 
         private List<EndpointItem> Endpoints()
@@ -2112,10 +2085,39 @@ namespace RelationshipGraphNative
             box.SetBounds(InspectorLeft, y, InspectorContentWidth(), 36); box.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right; _inspector.Controls.Add(box); y += 50; return box;
         }
 
+        private void AddArrangementItems(ToolStripItemCollection target, bool menu)
+        {
+            string[] labels = { "底对齐", "横向中心对齐", "横向均匀排布", "纵向均匀排布", "左侧边缘对齐", "右侧边缘对齐", "纵向中心对齐" };
+            string[] hints = { "至少选择两个对象，将底边对齐", "至少选择两个对象，将水平中心线对齐", "至少选择三个对象，固定左右两端，使水平间距相等", "至少选择三个对象，固定上下两端，使垂直间距相等", "至少选择两个对象，将左侧边缘对齐", "至少选择两个对象，将右侧边缘对齐", "至少选择两个对象，将竖直中心线对齐" };
+            for (int i = 0; i < labels.Length; i++)
+            {
+                SelectionArrangement mode = (SelectionArrangement)i;
+                ToolStripItem item = menu ? (ToolStripItem)new ToolStripMenuItem(labels[i]) : new ToolStripButton(labels[i]);
+                item.Tag = mode; item.ToolTipText = labels[i] + "：" + hints[i]; item.AccessibleName = labels[i]; item.Enabled = false;
+                item.DisplayStyle = ToolStripItemDisplayStyle.Image;
+                item.Image = ArrangementIcon.Create(mode, _darkTheme);
+                item.Disposed += delegate { if (item.Image != null) { item.Image.Dispose(); item.Image = null; } };
+                item.Click += delegate { ArrangeSelection(mode); };
+                target.Add(item); _arrangementItems.Add(item);
+            }
+        }
+
+        internal void ArrangeSelection(SelectionArrangement mode)
+        {
+            if (!_canvas.EditMode || _activeWorkId != 0 || _canvas.Document == null) return;
+            FinishPendingCanvasWork();
+            string before = GraphSerialization.Serialize(_canvas.Document, false);
+            if (!GraphSelectionArrangement.Apply(_canvas.Document, _canvas.SelectedNodeIds, _canvas.SelectedGroupIds, mode)) return;
+            CommitChange(before, "已完成所选对象的对齐或均匀排布");
+        }
+
         private void UpdateStatus()
         {
             if (_canvas.Document == null) return; _countText.Text = _canvas.Document.groups.Count + " 分组　" + _canvas.Document.nodes.Count + " 节点　" + _canvas.Document.edges.Count + " 关系"; _zoomText.Text = "缩放 " + Math.Round(_canvas.Zoom * 100) + "%";
             _undoButton.Enabled = _undo.Count > 0; _redoButton.Enabled = _redo.Count > 0;
+            int arrangementCount = GraphSelectionArrangement.Count(_canvas.Document, _canvas.SelectedNodeIds, _canvas.SelectedGroupIds);
+            foreach (ToolStripItem item in _arrangementItems)
+                item.Enabled = _canvas.EditMode && arrangementCount >= ((SelectionArrangement)item.Tag == SelectionArrangement.Horizontal || (SelectionArrangement)item.Tag == SelectionArrangement.Vertical ? 3 : 2);
         }
 
         private void UpdateTitle() { if (_canvas.Document != null) Text = _canvas.Document.meta.title + (_isDirty ? " *" : "") + " — 关系图编辑器" + (String.IsNullOrEmpty(_currentFile) ? "" : "  [" + Path.GetFileName(_currentFile) + "]"); }
@@ -2179,7 +2181,6 @@ namespace RelationshipGraphNative
             string help = String.Join("\n", new[]
             {
                 "关系图打开后始终可以直接编辑。", "", "高频操作：",
-                "· Ctrl+Shift+L：自动分层排版，并完成端口错开、连线避障和标签避让",
                 "· 右下角小地图：点击或拖动快速导航；可在“视图”菜单中关闭",
                 "· Tab / Shift+Tab：切换对象；方向键：移动；Shift+方向键：快速移动",
                 "· Alt+方向键：选择相邻对象；Ctrl+方向键：平移视野",

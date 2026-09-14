@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -168,6 +168,9 @@ namespace RelationshipGraphNative
         private PointF _worldDown;
         private PointF _worldCurrent;
         private bool _gestureMoved;
+        private bool _draggedSinceMouseDown;
+        private bool _processingMouseUp;
+        private int _gestureSequence;
         private string _gestureBeforeJson;
         private readonly Dictionary<string, PointF> _nodeStarts = new Dictionary<string, PointF>();
         private readonly Dictionary<string, RectangleF> _groupStarts = new Dictionary<string, RectangleF>();
@@ -185,6 +188,14 @@ namespace RelationshipGraphNative
         private Rectangle _selectionScreen;
         private float _alignmentGuideX = Single.NaN;
         private float _alignmentGuideY = Single.NaN;
+        private sealed class AlignmentDistanceHint
+        {
+            public RectangleF Moving, Reference;
+            public bool Horizontal;
+            public float Start, End;
+            public float Gap { get { return End - Start; } }
+        }
+        private AlignmentDistanceHint _horizontalDistanceHint, _verticalDistanceHint;
         private EqualSpacingHint _horizontalSpacingHint;
         private EqualSpacingHint _verticalSpacingHint;
         private HashSet<string> _gestureFocusEntities;
@@ -870,6 +881,9 @@ namespace RelationshipGraphNative
 
         protected override void OnMouseDoubleClick(MouseEventArgs e)
         {
+            // A quick select-then-drag can still carry the Windows double-click flag.
+            // Once the pointer has dragged, never turn that gesture into inline editing.
+            if (_draggedSinceMouseDown) return;
             base.OnMouseDoubleClick(e);
             if (!EditMode || e.Button != MouseButtons.Left || _document == null) return;
             PointF world = ScreenToWorld(e.Location);
@@ -918,7 +932,10 @@ namespace RelationshipGraphNative
 
         protected override void OnMouseDown(MouseEventArgs e)
         {
+            _draggedSinceMouseDown = false;
             base.OnMouseDown(e);
+            _gestureSequence++;
+
             FinishInlineEdit(true);
             Focus();
             if (_document == null) return;
@@ -1081,6 +1098,7 @@ namespace RelationshipGraphNative
             _gestureEntityId = primaryId;
             _alignmentGuideX = Single.NaN; _alignmentGuideY = Single.NaN;
             _horizontalSpacingHint = null; _verticalSpacingHint = null;
+            _horizontalDistanceHint = null; _verticalDistanceHint = null;
             _nodeStarts.Clear();
             foreach (string id in _selectedNodes)
             {
@@ -1095,6 +1113,7 @@ namespace RelationshipGraphNative
             _gestureEntityType = primaryType; _gestureEntityId = primaryId;
             _alignmentGuideX = Single.NaN; _alignmentGuideY = Single.NaN;
             _horizontalSpacingHint = null; _verticalSpacingHint = null;
+            _horizontalDistanceHint = null; _verticalDistanceHint = null;
             _nodeStarts.Clear(); _groupStarts.Clear();
             HashSet<string> movingGroupIds = new HashSet<string>(_selectedGroups, StringComparer.Ordinal);
             foreach (GraphGroup child in _document.groups)
@@ -1133,6 +1152,7 @@ namespace RelationshipGraphNative
             {
                 _alignmentGuideX = Single.NaN; _alignmentGuideY = Single.NaN;
                 _horizontalSpacingHint = null; _verticalSpacingHint = null;
+            _horizontalDistanceHint = null; _verticalDistanceHint = null;
             }
             else
             {
@@ -1168,6 +1188,7 @@ namespace RelationshipGraphNative
             _groupStart = RectOf(_groups[groupId]);
             _alignmentGuideX = Single.NaN; _alignmentGuideY = Single.NaN;
             _horizontalSpacingHint = null; _verticalSpacingHint = null;
+            _horizontalDistanceHint = null; _verticalDistanceHint = null;
             _nodeStarts.Clear(); _groupStarts.Clear();
             foreach (GraphGroup child in _document.groups)
                 if (child.id != groupId && child.groups != null && child.groups.Contains(groupId)) _groupStarts[child.id] = RectOf(child);
@@ -1188,7 +1209,7 @@ namespace RelationshipGraphNative
             if (_gesture == CanvasGesture.None) { UpdateHoverCursor(e.Location); return; }
             _worldCurrent = ScreenToWorld(e.Location);
             float screenDistance = Distance(e.Location, _mouseDown);
-            if (screenDistance >= 7f) _gestureMoved = true;
+            if (screenDistance >= 7f) { _gestureMoved = true; _draggedSinceMouseDown = true; }
 
             if (_gesture == CanvasGesture.Pan)
             {
@@ -1235,6 +1256,22 @@ namespace RelationshipGraphNative
 
         protected override void OnMouseUp(MouseEventArgs e)
         {
+            bool previous = _processingMouseUp;
+            _processingMouseUp = true;
+            try { CompleteMouseUp(e); }
+            finally { _processingMouseUp = previous; }
+        }
+
+        protected override void WndProc(ref Message message)
+        {
+            bool previous = _processingMouseUp;
+            if (message.Msg == 0x0202 || message.Msg == 0x0205) _processingMouseUp = true;
+            try { base.WndProc(ref message); }
+            finally { _processingMouseUp = previous; }
+        }
+
+        private void CompleteMouseUp(MouseEventArgs e)
+        {
             base.OnMouseUp(e);
             if (_miniMapPanning)
             {
@@ -1251,6 +1288,8 @@ namespace RelationshipGraphNative
             CanvasGesture completed = _gesture;
             string beforeJson = _gestureBeforeJson;
             bool moved = _gestureMoved;
+            // Mouse-up commits the gesture; UI callbacks must not cancel it on capture loss.
+            _gesture = CanvasGesture.None;
 
             if (completed == CanvasGesture.SelectBox && moved) ApplySelectionBox();
             else if (completed == CanvasGesture.SelectBox && !moved) ClearSelection();
@@ -1304,7 +1343,24 @@ namespace RelationshipGraphNative
         {
             base.OnMouseCaptureChanged(e);
             if (_miniMapPanning && !Capture) _miniMapPanning = false;
-            if (_gesture != CanvasGesture.None && !Capture) CancelActiveGesture();
+            if (_gesture == CanvasGesture.None || Capture || _processingMouseUp) return;
+            MouseButtons initiatingButton = _rightButtonPan ? MouseButtons.Right : MouseButtons.Left;
+            bool positional = _gesture == CanvasGesture.MoveNodes || _gesture == CanvasGesture.MoveGroup || _gesture == CanvasGesture.MoveSelection || _gesture == CanvasGesture.ResizeGroup;
+            if (!positional || !_gestureMoved || (MouseButtons & initiatingButton) != MouseButtons.None)
+            {
+                CancelActiveGesture(); return;
+            }
+            // Windows may release capture before delivering mouse-up. Let that message
+            // complete normally; if it never arrives, commit the last displayed position.
+            int sequence = _gestureSequence;
+            Action finishReleasedDrag = delegate
+            {
+                if (IsDisposed || Disposing || sequence != _gestureSequence || _gesture == CanvasGesture.None || Capture) return;
+                Point release = new Point((int)Math.Round(_worldCurrent.X * _zoom + _offsetX), (int)Math.Round(_worldCurrent.Y * _zoom + _offsetY));
+                OnMouseUp(new MouseEventArgs(initiatingButton, 1, release.X, release.Y, 0));
+            };
+            if (IsHandleCreated) BeginInvoke(finishReleasedDrag);
+            else finishReleasedDrag();
         }
 
         private void EndGesture()
@@ -1319,6 +1375,7 @@ namespace RelationshipGraphNative
             _controlToggleOnClick = false; _controlNodeWasSelected = false;
             _alignmentGuideX = Single.NaN; _alignmentGuideY = Single.NaN;
             _horizontalSpacingHint = null; _verticalSpacingHint = null;
+            _horizontalDistanceHint = null; _verticalDistanceHint = null;
             _nodeStarts.Clear();
             _groupStarts.Clear();
             _alignmentCandidates.Clear();
@@ -1484,6 +1541,7 @@ namespace RelationshipGraphNative
             {
                 _alignmentGuideX = Single.NaN; _alignmentGuideY = Single.NaN;
                 _horizontalSpacingHint = null; _verticalSpacingHint = null;
+            _horizontalDistanceHint = null; _verticalDistanceHint = null;
             }
             else
             {
@@ -1511,6 +1569,7 @@ namespace RelationshipGraphNative
         private void ApplyEqualSpacing(float left, float top, float right, float bottom, ref float dx, ref float dy)
         {
             _horizontalSpacingHint = null; _verticalSpacingHint = null;
+            _horizontalDistanceHint = null; _verticalDistanceHint = null;
             RectangleF start = RectangleF.FromLTRB(left, top, right, bottom);
             float threshold = 10f / Math.Max(.1f, SafeZoom(_zoom));
             EqualSpacingHint horizontal = FindEqualSpacing(start, dx, dy, true, threshold);
@@ -1524,6 +1583,8 @@ namespace RelationshipGraphNative
                 dy = vertical.TargetDelta; _alignmentGuideY = Single.NaN;
             }
             RectangleF finalMoving = OffsetRectangle(start, dx, dy);
+            _horizontalDistanceHint = FindAlignmentDistance(finalMoving, true, _alignmentGuideY);
+            _verticalDistanceHint = FindAlignmentDistance(finalMoving, false, _alignmentGuideX);
             if (horizontal != null && Math.Abs(dx - horizontal.TargetDelta) < .1f) _horizontalSpacingHint = FinalizeSpacingHint(horizontal, finalMoving);
             if (vertical != null && Math.Abs(dy - vertical.TargetDelta) < .1f) _verticalSpacingHint = FinalizeSpacingHint(vertical, finalMoving);
         }
@@ -1669,6 +1730,8 @@ namespace RelationshipGraphNative
                 if (_nodeStarts.ContainsKey(node.id) || _selectedNodes.Contains(node.id)) continue;
                 _alignmentCandidates.Add(RectOf(node));
             }
+            // Node-only dragging uses nodes as references, regardless of group membership.
+            if (_gestureEntityType == "node" && _selectedGroups.Count == 0) return;
             foreach (GraphGroup group in _document.groups)
             {
                 if (movingGroups.Contains(group.id)) continue;
@@ -1685,6 +1748,7 @@ namespace RelationshipGraphNative
             {
                 _alignmentGuideX = Single.NaN; _alignmentGuideY = Single.NaN;
                 _horizontalSpacingHint = null; _verticalSpacingHint = null;
+            _horizontalDistanceHint = null; _verticalDistanceHint = null;
             }
             else
             {
@@ -2009,7 +2073,7 @@ namespace RelationshipGraphNative
 
                 if (interactive && EditMode)
                 {
-                    if ((_gesture == CanvasGesture.MoveNodes || _gesture == CanvasGesture.MoveGroup || _gesture == CanvasGesture.MoveSelection) && _gestureMoved) { DrawAlignmentGuides(graphics, unit); DrawEqualSpacingHints(graphics, unit); }
+                    if ((_gesture == CanvasGesture.MoveNodes || _gesture == CanvasGesture.MoveGroup || _gesture == CanvasGesture.MoveSelection) && _gestureMoved) { DrawAlignmentGuides(graphics, unit); DrawEqualSpacingHints(graphics, unit); DrawAlignmentDistances(graphics, unit); }
                     DrawSelectionHandles(graphics, unit);
                     if (_gesture == CanvasGesture.Link && _gestureMoved) DrawLinkPreview(graphics, unit);
                 }
@@ -2073,6 +2137,65 @@ namespace RelationshipGraphNative
             if (margin > 0) expanded.Inflate(margin, margin);
             return expanded.IntersectsWith(visible);
         }
+
+        private AlignmentDistanceHint FindAlignmentDistance(RectangleF moving, bool horizontal, float guide)
+        {
+            if (!IsFinite(guide)) return null;
+            AlignmentDistanceHint best = null;
+            foreach (RectangleF candidate in AlignmentCandidates())
+            {
+                float movingStart = AxisStart(moving, !horizontal), movingEnd = AxisEnd(moving, !horizontal);
+                float referenceStart = AxisStart(candidate, !horizontal), referenceEnd = AxisEnd(candidate, !horizontal);
+                bool matches = (Math.Abs(movingStart - guide) < .1f && Math.Abs(referenceStart - guide) < .1f)
+                    || (Math.Abs(movingEnd - guide) < .1f && Math.Abs(referenceEnd - guide) < .1f)
+                    || (Math.Abs((movingStart + movingEnd) / 2f - guide) < .1f && Math.Abs((referenceStart + referenceEnd) / 2f - guide) < .1f);
+                if (!matches) continue;
+                float start, end;
+                if (AxisEnd(candidate, horizontal) <= AxisStart(moving, horizontal))
+                { start = AxisEnd(candidate, horizontal); end = AxisStart(moving, horizontal); }
+                else if (AxisEnd(moving, horizontal) <= AxisStart(candidate, horizontal))
+                { start = AxisEnd(moving, horizontal); end = AxisStart(candidate, horizontal); }
+                else continue; // Overlapping rectangles have no visible edge-to-edge gap.
+                if (best == null || end - start < best.Gap)
+                    best = new AlignmentDistanceHint { Moving = moving, Reference = candidate, Horizontal = horizontal, Start = start, End = end };
+            }
+            return best;
+        }
+
+        private void DrawAlignmentDistances(Graphics graphics, float unit)
+        {
+            if (_horizontalDistanceHint != null && _horizontalSpacingHint == null) DrawAlignmentDistance(graphics, _horizontalDistanceHint, unit);
+            if (_verticalDistanceHint != null && _verticalSpacingHint == null) DrawAlignmentDistance(graphics, _verticalDistanceHint, unit);
+        }
+
+        private void DrawAlignmentDistance(Graphics graphics, AlignmentDistanceHint hint, float unit)
+        {
+            RectangleF visible = VisibleWorldRectangle();
+            float axis = hint.Horizontal ? Math.Max(hint.Moving.Bottom, hint.Reference.Bottom) + 18 * unit : Math.Max(hint.Moving.Right, hint.Reference.Right) + 18 * unit;
+            float limit = hint.Horizontal ? visible.Bottom : visible.Right;
+            if (axis > limit - 24 * unit)
+                axis = (hint.Horizontal ? Math.Min(hint.Moving.Top, hint.Reference.Top) : Math.Min(hint.Moving.Left, hint.Reference.Left)) - 24 * unit;
+            Color color = DarkTheme ? Color.FromArgb(255, 157, 195) : Color.FromArgb(176, 35, 94);
+            using (Pen pen = new Pen(color, 1.4f * unit))
+            using (Brush ink = new SolidBrush(color))
+            using (Brush background = new SolidBrush(DarkTheme ? Color.FromArgb(29, 35, 44) : Color.White))
+            using (Font font = new Font(Font.FontFamily, 11f * unit, FontStyle.Bold, GraphicsUnit.Pixel))
+            {
+                DrawSpacingSegment(graphics, pen, hint.Start, hint.End, axis, hint.Horizontal, unit);
+                string label = "间距 " + hint.Gap.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
+                SizeF size = graphics.MeasureString(label, font);
+                float middle = (hint.Start + hint.End) / 2f;
+                float x = hint.Horizontal ? middle - size.Width / 2f : axis + 5 * unit;
+                float y = hint.Horizontal ? axis + 5 * unit : middle - size.Height / 2f;
+                x = Math.Max(visible.Left + 3 * unit, Math.Min(x, visible.Right - size.Width - 3 * unit));
+                y = Math.Max(visible.Top + 3 * unit, Math.Min(y, visible.Bottom - size.Height - 3 * unit));
+                graphics.FillRectangle(background, x - 2 * unit, y - unit, size.Width + 4 * unit, size.Height + 2 * unit);
+                graphics.DrawString(label, font, ink, x, y);
+            }
+        }
+
+        internal float HorizontalAlignmentDistanceForTesting { get { return _horizontalDistanceHint == null ? Single.NaN : _horizontalDistanceHint.Gap; } }
+        internal float VerticalAlignmentDistanceForTesting { get { return _verticalDistanceHint == null ? Single.NaN : _verticalDistanceHint.Gap; } }
 
         private void DrawAlignmentGuides(Graphics graphics, float unit)
         {
