@@ -1148,6 +1148,7 @@ namespace RelationshipGraphNative
             float top = starts.Min(delegate(RectangleF rect) { return rect.Top; });
             float right = starts.Max(delegate(RectangleF rect) { return rect.Right; });
             float bottom = starts.Max(delegate(RectangleF rect) { return rect.Bottom; });
+            dx = Snap(dx); dy = Snap(dy);
             if (freePlacement)
             {
                 _alignmentGuideX = Single.NaN; _alignmentGuideY = Single.NaN;
@@ -1156,7 +1157,6 @@ namespace RelationshipGraphNative
             }
             else
             {
-                dx = Snap(dx); dy = Snap(dy);
                 ApplyNodeAlignment(left, top, right, bottom, ref dx, ref dy);
                 ApplyEqualSpacing(left, top, right, bottom, ref dx, ref dy);
             }
@@ -1537,6 +1537,7 @@ namespace RelationshipGraphNative
             float top = _nodeStarts.Min(delegate(KeyValuePair<string, PointF> pair) { return pair.Value.Y; });
             float right = _nodeStarts.Max(delegate(KeyValuePair<string, PointF> pair) { return pair.Value.X + _nodes[pair.Key].w; });
             float bottom = _nodeStarts.Max(delegate(KeyValuePair<string, PointF> pair) { return pair.Value.Y + _nodes[pair.Key].h; });
+            dx = Snap(dx); dy = Snap(dy);
             if (freePlacement)
             {
                 _alignmentGuideX = Single.NaN; _alignmentGuideY = Single.NaN;
@@ -1545,7 +1546,6 @@ namespace RelationshipGraphNative
             }
             else
             {
-                dx = Snap(dx); dy = Snap(dy);
                 ApplyNodeAlignment(left, top, right, bottom, ref dx, ref dy);
                 ApplyEqualSpacing(left, top, right, bottom, ref dx, ref dy);
             }
@@ -1653,7 +1653,7 @@ namespace RelationshipGraphNative
                 float available = AxisStart(last, horizontal) - AxisEnd(first, horizontal) - length;
                 gap = available / 2f; targetStart = AxisEnd(first, horizontal) + gap;
             }
-            if (gap < 8f) return;
+            if (gap < 0f || Math.Abs(gap - Snap(gap)) > .001f) return;
             float originalStart = AxisStart(movingStart, horizontal), targetDelta = targetStart - originalStart;
             float currentDelta = horizontal ? dx : dy, difference = Math.Abs(targetDelta - currentDelta);
             if (difference > threshold) return;
@@ -1707,6 +1707,7 @@ namespace RelationshipGraphNative
         private static void ConsiderAlignment(float target, float moving, ref float bestDistance, ref float bestAdjustment, ref float bestGuide)
         {
             float adjustment = target - moving, distance = Math.Abs(adjustment);
+            if (Math.Abs(adjustment - Snap(adjustment)) > .001f) return;
             if (distance >= bestDistance) return;
             bestDistance = distance; bestAdjustment = adjustment; bestGuide = target;
         }
@@ -1744,6 +1745,7 @@ namespace RelationshipGraphNative
         private void ApplyGroupMove(float dx, float dy, bool freePlacement)
         {
             GraphGroup group = _groups[_gestureEntityId];
+            dx = Snap(dx); dy = Snap(dy);
             if (freePlacement)
             {
                 _alignmentGuideX = Single.NaN; _alignmentGuideY = Single.NaN;
@@ -1752,7 +1754,6 @@ namespace RelationshipGraphNative
             }
             else
             {
-                dx = Snap(dx); dy = Snap(dy);
                 ApplyNodeAlignment(_groupStart.Left, _groupStart.Top, _groupStart.Right, _groupStart.Bottom, ref dx, ref dy);
                 ApplyEqualSpacing(_groupStart.Left, _groupStart.Top, _groupStart.Right, _groupStart.Bottom, ref dx, ref dy);
             }
@@ -2337,6 +2338,8 @@ namespace RelationshipGraphNative
                     edgeIds.Add(selected.id);
                     entities.Add(GraphSerialization.EndpointKey(selected.sourceType, selected.source));
                     entities.Add(GraphSerialization.EndpointKey(selected.targetType, selected.target));
+                    foreach (GraphSemanticRelation relation in GraphSemanticRelation.Enumerate(_document))
+                        if (relation.EdgeId == selected.id) { entities.Add(relation.SourceKey); entities.Add(relation.TargetKey); }
                 }
                 return;
             }
@@ -2357,12 +2360,12 @@ namespace RelationshipGraphNative
                 if (!adjacent.ContainsKey(from)) adjacent[from] = new List<KeyValuePair<string, string>>();
                 adjacent[from].Add(new KeyValuePair<string, string>(to, edgeId));
             };
-            foreach (GraphEdge edge in _document.edges)
+            foreach (GraphSemanticRelation edge in GraphSemanticRelation.Enumerate(_document))
             {
-                string source = GraphSerialization.EndpointKey(edge.sourceType, edge.source);
-                string target = GraphSerialization.EndpointKey(edge.targetType, edge.target);
-                if (direction == "all" || direction == "downstream") add(source, target, edge.id);
-                if (direction == "all" || direction == "upstream") add(target, source, edge.id);
+                string source = edge.SourceKey;
+                string target = edge.TargetKey;
+                if (direction == "all" || direction == "downstream") add(source, target, edge.EdgeId);
+                if (direction == "all" || direction == "upstream") add(target, source, edge.EdgeId);
             }
             Queue<KeyValuePair<string, int>> queue = new Queue<KeyValuePair<string, int>>();
             Dictionary<string, int> seen = new Dictionary<string, int>();
@@ -2407,10 +2410,10 @@ namespace RelationshipGraphNative
             string direction = String.IsNullOrEmpty(FocusDirection) ? "all" : FocusDirection;
             if (direction != "upstream" && direction != "downstream") return inactive;
             HashSet<string> active = new HashSet<string>(StringComparer.Ordinal);
-            foreach (GraphEdge edge in _document.edges)
+            foreach (GraphSemanticRelation edge in GraphSemanticRelation.Enumerate(_document))
             {
-                string sourceKey = GraphSerialization.EndpointKey(edge.sourceType, edge.source);
-                string targetKey = GraphSerialization.EndpointKey(edge.targetType, edge.target);
+                string sourceKey = edge.SourceKey;
+                string targetKey = edge.TargetKey;
                 if (sourceKey == targetKey) continue;
                 active.Add(direction == "downstream" ? sourceKey : targetKey);
             }
@@ -2431,10 +2434,10 @@ namespace RelationshipGraphNative
             string direction = String.IsNullOrEmpty(FocusDirection) ? "all" : FocusDirection;
             if (direction != "upstream" && direction != "downstream") return false;
             string nodeKey = GraphSerialization.EndpointKey("node", node.id);
-            foreach (GraphEdge edge in _document.edges)
+            foreach (GraphSemanticRelation edge in GraphSemanticRelation.Enumerate(_document))
             {
-                string sourceKey = GraphSerialization.EndpointKey(edge.sourceType, edge.source);
-                string targetKey = GraphSerialization.EndpointKey(edge.targetType, edge.target);
+                string sourceKey = edge.SourceKey;
+                string targetKey = edge.TargetKey;
                 if (sourceKey == targetKey) continue;
                 if (direction == "downstream" && sourceKey == nodeKey) return false;
                 if (direction == "upstream" && targetKey == nodeKey) return false;
@@ -2919,12 +2922,12 @@ namespace RelationshipGraphNative
         private static float ClampWorldCoordinate(double value)
         {
             if (Double.IsNaN(value) || Double.IsInfinity(value)) return 0f;
-            return (float)Math.Max(-GraphSerialization.MaxCoordinate, Math.Min(GraphSerialization.MaxCoordinate, value));
+            return GraphSerialization.SnapToGrid(Math.Max(-GraphSerialization.MaxCoordinate, Math.Min(GraphSerialization.MaxCoordinate, value)));
         }
         private static float ClampItemDimension(double value, float minimum)
         {
-            if (Double.IsNaN(value) || Double.IsInfinity(value)) return minimum;
-            return (float)Math.Max(minimum, Math.Min(GraphSerialization.MaxItemDimension, value));
+            if (Double.IsNaN(value) || Double.IsInfinity(value)) return GraphSerialization.SnapToGrid(Math.Ceiling(minimum / 5d) * 5d);
+            return GraphSerialization.SnapToGrid(Math.Max(Math.Ceiling(minimum / 5d) * 5d, Math.Min(GraphSerialization.MaxItemDimension, value)));
         }
         private static RectangleF NodeTypeEditArea(GraphNode node)
         {
@@ -2937,7 +2940,7 @@ namespace RelationshipGraphNative
             float width = Math.Min(group.w - 12, Math.Max(100, (group.label ?? "分组").Length * 16 + 28));
             return new RectangleF(group.x + 6, group.y + 4, width, 30);
         }
-        private static float Snap(float value) { return (float)Math.Round(value / 5f) * 5f; }
+        private static float Snap(float value) { return GraphSerialization.SnapToGrid(value); }
         private static float Distance(Point a, Point b) { float dx = a.X - b.X, dy = a.Y - b.Y; return (float)Math.Sqrt(dx * dx + dy * dy); }
         private static float Distance(PointF a, PointF b) { float dx = a.X - b.X, dy = a.Y - b.Y; return (float)Math.Sqrt(dx * dx + dy * dy); }
         private static string DirectionSide(PointF start, PointF end, string fallback)

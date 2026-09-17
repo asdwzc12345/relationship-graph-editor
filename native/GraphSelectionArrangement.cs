@@ -46,12 +46,12 @@ namespace RelationshipGraphNative
                 float start = horizontal ? items[0].Bounds.Left : items[0].Bounds.Top;
                 float end = horizontal ? items[items.Count - 1].Bounds.Right : items[items.Count - 1].Bounds.Bottom;
                 float total = items.Sum(item => horizontal ? item.Bounds.Width : item.Bounds.Height);
-                float gap = (end - start - total) / (items.Count - 1);
+                float gap = Math.Max(0, GraphSerialization.SnapToGrid((end - start - total) / (items.Count - 1)));
                 float position = start;
                 for (int i = 0; i < items.Count; i++)
                 {
                     Item item = items[i];
-                    if (i > 0 && i < items.Count - 1)
+                    if (i > 0)
                         item.Offset = horizontal ? new PointF(position - item.Bounds.Left, 0) : new PointF(0, position - item.Bounds.Top);
                     position += (horizontal ? item.Bounds.Width : item.Bounds.Height) + gap;
                 }
@@ -75,6 +75,8 @@ namespace RelationshipGraphNative
                     }
                 }
             }
+            foreach (Item item in items)
+                item.Offset = new PointF(GraphSerialization.SnapToGrid(item.Offset.X), GraphSerialization.SnapToGrid(item.Offset.Y));
             if (!items.Any(item => Math.Abs(item.Offset.X) > .001f || Math.Abs(item.Offset.Y) > .001f)) return false;
             // Resolve owners before moving anything: a group and its contents move only once.
             foreach (GraphNode node in graph.nodes)

@@ -178,20 +178,8 @@ namespace RelationshipGraphNative
             };
             KeyDown += MainFormKeyDown;
 
-            string startupMessage = "原生关系图已打开";
-            GraphDocument first = initialGraph;
-            bool recoveredAutosave = false;
-            if (first == null)
-            {
-                first = TryLoadAutosave(out startupMessage);
-                recoveredAutosave = first != null;
-                if (first == null)
-                {
-                    first = GraphSerialization.LoadDefault();
-                    if (String.IsNullOrEmpty(startupMessage)) startupMessage = "原生关系图已打开";
-                }
-            }
-            LoadDocument(first, startupMessage, true, "", recoveredAutosave, false);
+            GraphDocument first = initialGraph ?? GraphSerialization.CreateBlank("未命名关系图");
+            LoadDocument(first, initialGraph == null ? "已打开空白关系图" : "关系图已打开", true, "", false, false);
             ApplyTheme();
         }
 
@@ -201,7 +189,7 @@ namespace RelationshipGraphNative
             ToolStripMenuItem file = new ToolStripMenuItem("文件(&F)");
             file.DropDownItems.Add(MenuItem("新建关系图", Keys.Control | Keys.N, NewRelationshipGraph));
             file.DropDownItems.Add(MenuItem("新建流程图", Keys.Control | Keys.Shift | Keys.N, NewFlowchart));
-            file.DropDownItems.Add(MenuItem("恢复默认测试用图", Keys.None, RestoreDefault));
+            file.DropDownItems.Add(MenuItem("恢复上次未保存的图", Keys.None, RestoreAutosave));
             file.DropDownItems.Add(new ToolStripSeparator());
             file.DropDownItems.Add(MenuItem("导入 JSON / Draw.io / 只读可视图…", Keys.Control | Keys.O, OpenGraph));
             _recentFilesItem = new ToolStripMenuItem("最近文件");
@@ -211,9 +199,9 @@ namespace RelationshipGraphNative
             file.DropDownItems.Add(MenuItem("另存为…", Keys.Control | Keys.Shift | Keys.S, delegate { SaveJson(true); }));
             file.DropDownItems.Add(new ToolStripSeparator());
             ToolStripMenuItem export = new ToolStripMenuItem("导出");
-            export.DropDownItems.Add(MenuItem("飞书画板（draw.io，可编辑）…", Keys.None, ExportFeishuBoard));
+            export.DropDownItems.Add(MenuItem("Draw.io 画板", Keys.None, ExportFeishuBoard));
             export.DropDownItems.Add(new ToolStripSeparator());
-            export.DropDownItems.Add(MenuItem("只读可视图（HTML）…", Keys.None, ExportReadonly));
+            export.DropDownItems.Add(MenuItem("Html 只读网页", Keys.None, ExportReadonly));
             export.DropDownItems.Add(MenuItem("SVG 矢量图…", Keys.None, ExportSvg));
             export.DropDownItems.Add(MenuItem("PNG 图片…", Keys.None, ExportPng));
             export.DropDownItems.Add(MenuItem("PDF 文档…", Keys.None, ExportPdf));
@@ -237,8 +225,8 @@ namespace RelationshipGraphNative
             edit.DropDownItems.Add(MenuItem("新增关系…", Keys.Control | Keys.L, AddRelation));
             edit.DropDownItems.Add(MenuItem("删除选中项", Keys.Delete, DeleteSelected));
 
-            ToolStripMenuItem arrange = new ToolStripMenuItem("排列"); arrange.DropDown.ShowItemToolTips = true;
-            AddArrangementItems(arrange.DropDownItems, true);
+
+
 
 
             ToolStripMenuItem view = new ToolStripMenuItem("视图(&V)");
@@ -261,7 +249,7 @@ namespace RelationshipGraphNative
             ToolStripMenuItem help = new ToolStripMenuItem("帮助(&H)");
             help.DropDownItems.Add(MenuItem("操作说明", Keys.F1, ShowHelp));
             help.DropDownItems.Add(MenuItem("关于", Keys.None, ShowAbout));
-            menu.Items.Add(file); menu.Items.Add(edit); menu.Items.Add(arrange); menu.Items.Add(view); menu.Items.Add(help);
+            menu.Items.Add(file); menu.Items.Add(edit); menu.Items.Add(view); menu.Items.Add(help);
             return menu;
         }
 
@@ -542,7 +530,7 @@ namespace RelationshipGraphNative
             try { candidates = _autosaveStore.GetRecoveryCandidates(); }
             catch (Exception error)
             {
-                message = "无法检查自动恢复文件：" + PersistenceErrorMessage(error) + "；已打开默认图";
+                message = "无法检查自动恢复文件：" + PersistenceErrorMessage(error);
                 return null;
             }
 
@@ -561,7 +549,7 @@ namespace RelationshipGraphNative
             }
 
             if (lastError != null)
-                message = "自动恢复文件均无法读取：" + PersistenceErrorMessage(lastError) + "；已打开默认图";
+                message = "自动恢复文件均无法读取：" + PersistenceErrorMessage(lastError);
             return null;
         }
 
@@ -606,12 +594,18 @@ namespace RelationshipGraphNative
 
         private bool IsFlowchart { get { return _canvas.Document != null && _canvas.Document.meta != null && _canvas.Document.meta.diagramType == "flowchart"; } }
 
-        private void RestoreDefault()
+        private void RestoreAutosave()
         {
+            string message;
+            GraphDocument recovered = TryLoadAutosave(out message);
+            if (recovered == null)
+            {
+                _statusText.Text = String.IsNullOrEmpty(message) ? "没有可恢复的图" : message;
+                return;
+            }
             if (!EnsureCurrentDocumentCanBeReplaced()) return;
-            LoadDocument(GraphSerialization.LoadDefault(), "已恢复《测试用图》", true, "", true, true);
+            LoadDocument(recovered, message, true, "", true, true);
         }
-
         private void OpenGraph()
         {
             using (OpenFileDialog dialog = new OpenFileDialog())
@@ -1163,7 +1157,7 @@ namespace RelationshipGraphNative
             float x, y, width, height;
             if (wrapsSelection)
             {
-                const float horizontalPadding = 28f, titlePadding = 50f, bottomPadding = 28f;
+                const float horizontalPadding = 30f, titlePadding = 50f, bottomPadding = 30f;
                 width = Math.Max(220f, selectedBounds.Width + horizontalPadding * 2f);
                 height = Math.Max(150f, selectedBounds.Height + titlePadding + bottomPadding);
                 x = selectedBounds.Left - (width - selectedBounds.Width) / 2f;
@@ -1969,8 +1963,10 @@ namespace RelationshipGraphNative
 
         private string RelationSummary(string type, string id)
         {
-            int incoming = _canvas.Document.edges.Count(delegate(GraphEdge edge) { return edge.targetType == type && edge.target == id; });
-            int outgoing = _canvas.Document.edges.Count(delegate(GraphEdge edge) { return edge.sourceType == type && edge.source == id; });
+            string key = GraphSerialization.EndpointKey(type, id);
+            List<GraphSemanticRelation> relations = GraphSemanticRelation.Enumerate(_canvas.Document).ToList();
+            int incoming = relations.Where(r => r.TargetKey == key).Select(r => r.EdgeId).Distinct().Count();
+            int outgoing = relations.Where(r => r.SourceKey == key).Select(r => r.EdgeId).Distinct().Count();
             return "产出关系 " + incoming + " 条　消耗关系 " + outgoing + " 条";
         }
 
@@ -2088,7 +2084,7 @@ namespace RelationshipGraphNative
         private void AddArrangementItems(ToolStripItemCollection target, bool menu)
         {
             string[] labels = { "底对齐", "横向中心对齐", "横向均匀排布", "纵向均匀排布", "左侧边缘对齐", "右侧边缘对齐", "纵向中心对齐" };
-            string[] hints = { "至少选择两个对象，将底边对齐", "至少选择两个对象，将水平中心线对齐", "至少选择三个对象，固定左右两端，使水平间距相等", "至少选择三个对象，固定上下两端，使垂直间距相等", "至少选择两个对象，将左侧边缘对齐", "至少选择两个对象，将右侧边缘对齐", "至少选择两个对象，将竖直中心线对齐" };
+            string[] hints = { "至少选择两个对象，将底边对齐", "至少选择两个对象，将水平中心线对齐", "至少选择三个对象，固定左端，使水平间距为相等的 5 的倍数", "至少选择三个对象，固定上端，使垂直间距为相等的 5 的倍数", "至少选择两个对象，将左侧边缘对齐", "至少选择两个对象，将右侧边缘对齐", "至少选择两个对象，将竖直中心线对齐" };
             for (int i = 0; i < labels.Length; i++)
             {
                 SelectionArrangement mode = (SelectionArrangement)i;
@@ -2189,7 +2185,7 @@ namespace RelationshipGraphNative
                 "· Ctrl+O / Ctrl+S / Ctrl+Shift+S：导入、保存、另存为",
                 "", "画布操作：",
                 "· 双击空白处新增节点；有选中内容时点击＋分组会自动包住选中内容",
-                "· 先选中再拖动可移动对象；Ctrl 拖动关闭吸附并自由摆放",
+                "· 先选中再拖动可移动对象；Ctrl 拖动关闭智能对齐，仍按 5 单位移动",
                 "· 拖动未选中的节点或分组到目标可创建关系",
                 "· Ctrl/Shift 单击多选；空白处左键拖动框选；Delete 删除；Ctrl+Z 撤销",
                 "· 选中分组后拖动边缘或四角调整大小；右键拖动画布；滚轮缩放",

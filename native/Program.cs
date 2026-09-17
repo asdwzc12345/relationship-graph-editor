@@ -56,12 +56,33 @@ namespace RelationshipGraphNative
             string tempFolder = "";
             try
             {
-                GraphDocument graph = GraphSerialization.LoadDefault();
-                Require(graph.meta.title == "测试用图", "默认图名称错误");
+                using (MainForm startup = new MainForm(null, false))
+                {
+                    GraphDocument empty = startup.CanvasForTesting.Document;
+                    Require(empty.meta.title == "未命名关系图" && empty.groups.Count == 0 && empty.nodes.Count == 0 && empty.edges.Count == 0, "启动时没有打开空白图");
+                    Require(!startup.DirtyForTesting && startup.EditModeForTesting, "空白启动状态错误");
+                    Require(empty.settings.relationTypes.Count == 1 && empty.settings.relationTypes[0].label == "关联", "空白图仍带有示例分类");
+                    GraphDocument normalizedEmpty = GraphSerialization.Clone(empty);
+                    Require(normalizedEmpty.nodes.Count == 0 && normalizedEmpty.settings.relationTypes.Count == 1, "空白图往返后出现示例数据");
+                }
+                // Synthetic data used only by --self-test, never loaded by the editor.
+                GraphDocument graph = GraphSerialization.CreateBlank("自检");
+                for (int groupIndex = 0; groupIndex < 4; groupIndex++)
+                {
+                    graph.groups.Add(new GraphGroup { id = "g" + groupIndex, label = "分组 " + groupIndex, x = 30 + groupIndex * 330, y = 55, w = 300, h = 650 });
+                    for (int nodeIndex = 0; nodeIndex < 3; nodeIndex++)
+                    {
+                        int index = groupIndex * 3 + nodeIndex;
+                        graph.nodes.Add(new GraphNode { id = "n" + index, label = "节点 " + index, type = "节点类型", kind = "system", group = "g" + groupIndex, x = 70 + groupIndex * 330, y = 135 + nodeIndex * 190, w = 200, h = 68 });
+                        graph.edges.Add(new GraphEdge { id = "e" + index, source = "n" + index, target = "n" + ((index + 1) % 12), label = "关联 " + index, category = "core" });
+                    }
+                }
+                graph = GraphSerialization.Normalize(graph);
+
                 Require(graph.version == 3 && graph.nodes.All(delegate(GraphNode node) { return node.groups != null; }) && graph.groups.All(delegate(GraphGroup group) { return group.groups != null; }), "多层分组数据结构未升级");
-                Require(graph.groups.Count == 4, "默认分组数量错误");
-                Require(graph.nodes.Count == 12, "默认节点数量错误");
-                Require(graph.edges.Count == 12, "默认关系数量错误");
+                Require(graph.groups.Count == 4, "自检分组数量错误");
+                Require(graph.nodes.Count == 12, "自检节点数量错误");
+                Require(graph.edges.Count == 12, "自检关系数量错误");
                 Require(graph.edges.TrueForAll(delegate(GraphEdge edge) { return edge.sourceType == "node" && edge.targetType == "node"; }), "旧版端点兼容失败");
 
                 GraphDocument roundTrip = GraphSerialization.Deserialize(GraphSerialization.Serialize(graph, false));
@@ -569,10 +590,11 @@ namespace RelationshipGraphNative
                     System.Drawing.PointF initialCenter = centerCreateCanvas.ViewCenterWorld;
                     centerCreateWindow.AddGroupForTesting();
                     GraphGroup centeredGroup = centerCreateGraph.groups[0];
-                    Require(Math.Abs(centeredGroup.x + centeredGroup.w / 2f - initialCenter.X) < .1f && Math.Abs(centeredGroup.y + centeredGroup.h / 2f - initialCenter.Y) < .1f, "新增分组未创建在当前屏幕中心");
+                    Require(Math.Abs(centeredGroup.x + centeredGroup.w / 2f - initialCenter.X) <= 2.5f && Math.Abs(centeredGroup.y + centeredGroup.h / 2f - initialCenter.Y) <= 2.5f, "新增分组未创建在当前屏幕中心");
                     centerCreateWindow.AddNodeForTesting();
                     GraphNode centeredNode = centerCreateGraph.nodes[0];
-                    Require(Math.Abs(centeredNode.x + centeredNode.w / 2f - initialCenter.X) < .1f && Math.Abs(centeredNode.y + centeredNode.h / 2f - initialCenter.Y) < .1f, "新增节点未创建在当前屏幕中心");
+                    Require(Math.Abs(centeredNode.x + centeredNode.w / 2f - initialCenter.X) <= 2.5f && Math.Abs(centeredNode.y + centeredNode.h / 2f - initialCenter.Y) <= 2.5f, "新增节点未创建在当前屏幕中心");
+                    Require(centeredNode.x % 5 == 0 && centeredNode.y % 5 == 0 && centeredNode.w % 5 == 0 && centeredNode.h % 5 == 0, "新建节点未遵守五单位网格");
                     Require(centeredNode.group == centeredGroup.id, "屏幕中心位于分组内时新增节点未自动归组");
                     System.Reflection.MethodInfo centerDown = typeof(GraphCanvas).GetMethod("OnMouseDown", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
                     System.Reflection.MethodInfo centerMove = typeof(GraphCanvas).GetMethod("OnMouseMove", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
@@ -583,7 +605,7 @@ namespace RelationshipGraphNative
                     System.Drawing.PointF movedCenter = centerCreateCanvas.ViewCenterWorld;
                     centerCreateCanvas.ClearSelection();
                     centerCreateWindow.AddGroupForTesting(); GraphGroup movedCenterGroup = centerCreateGraph.groups[1];
-                    Require(Math.Abs(movedCenterGroup.x + movedCenterGroup.w / 2f - movedCenter.X) < .1f && Math.Abs(movedCenterGroup.y + movedCenterGroup.h / 2f - movedCenter.Y) < .1f, "平移画布后新增分组未跟随新的屏幕中心");
+                    Require(Math.Abs(movedCenterGroup.x + movedCenterGroup.w / 2f - movedCenter.X) <= 2.5f && Math.Abs(movedCenterGroup.y + movedCenterGroup.h / 2f - movedCenter.Y) <= 2.5f, "平移画布后新增分组未跟随新的屏幕中心");
                 }
 
                 GraphDocument linkGraph = GraphSerialization.CreateBlank("真实拉线回归测试");
@@ -756,7 +778,7 @@ namespace RelationshipGraphNative
                     Require(!selectionCanvas.NeighborHighlightActiveForTesting, "粘贴后的多选节点仍自动高亮邻居");
                     float pastedNodeX = pastedNodes[0].x, pastedGroupX = pastedGroups[0].x;
                     selectionCanvas.MoveSelectedObjectsForTesting(37f, 29f, true);
-                    Require(Math.Abs(pastedNodes[0].x - pastedNodeX - 37f) < .1f && Math.Abs(pastedGroups[0].x - pastedGroupX - 37f) < .1f, "节点与分组混合选择后未整体移动");
+                    Require(Math.Abs(pastedNodes[0].x - pastedNodeX - 35f) < .1f && Math.Abs(pastedGroups[0].x - pastedGroupX - 35f) < .1f, "节点与分组混合选择后未整体移动");
                     selectionCanvas.ZoomBy(1.35f); float zoomBeforeUndo = selectionCanvas.Zoom; System.Drawing.PointF offsetBeforeUndo = selectionCanvas.ViewOffset;
                     selectionWindow.UndoForTesting();
                     Require(Math.Abs(selectionCanvas.Zoom - zoomBeforeUndo) < .0001f && Math.Abs(selectionCanvas.ViewOffset.X - offsetBeforeUndo.X) < .1f && Math.Abs(selectionCanvas.ViewOffset.Y - offsetBeforeUndo.Y) < .1f, "撤销操作错误改变了当前缩放比例或画布位置");
@@ -870,6 +892,72 @@ namespace RelationshipGraphNative
                         Require(Math.Abs((firstDragType == "node" ? firstDragCanvas.Document.nodes[0].x : firstDragCanvas.Document.groups[0].x) - movedX) < .1f && dragCommits == 1, "显式取消未恢复位置或产生多余提交");
                     }
                 }
+                GraphDocument inherited = GraphSerialization.CreateBlank("区域继承父节点");
+                inherited.groups.Add(new GraphGroup { id = "area", x = 300, y = 0, w = 600, h = 500 });
+                inherited.groups.Add(new GraphGroup { id = "inner", x = 550, y = 150, w = 300, h = 250 });
+                inherited.nodes.Add(new GraphNode { id = "parent", label = "父节点", x = 0, y = 0, w = 150, h = 55 });
+                inherited.nodes.Add(new GraphNode { id = "child", label = "子节点", x = 350, y = 50, w = 150, h = 55 });
+                inherited.nodes.Add(new GraphNode { id = "nested", label = "嵌套节点", x = 600, y = 200, w = 150, h = 55 });
+                inherited.nodes.Add(new GraphNode { id = "outside", label = "外部节点", x = 1000, y = 200, w = 150, h = 55 });
+                inherited.edges.Add(new GraphEdge { id = "to_area", sourceType = "node", source = "parent", targetType = "group", target = "area" });
+                inherited.edges.Add(new GraphEdge { id = "to_outside", sourceType = "node", source = "nested", targetType = "node", target = "outside" });
+                using (GraphCanvas inheritedCanvas = new GraphCanvas())
+                {
+                    inheritedCanvas.Document = inherited; inheritedCanvas.EditMode = true;
+                    inheritedCanvas.FocusDepth = 1; inheritedCanvas.FocusDirection = "downstream";
+                    inheritedCanvas.SelectEntity("node", "parent");
+                    HashSet<string> descendants = inheritedCanvas.FocusedEntitiesForTesting();
+                    Require(descendants.Contains("node:child") && descendants.Contains("node:nested") && !descendants.Contains("node:outside"), "区域内节点未作为一层子节点高亮，或错误包含区域外节点");
+                    inheritedCanvas.FocusDepth = 2;
+                    Require(inheritedCanvas.FocusedEntitiesForTesting().Contains("node:outside"), "区域继承关系未参与多层下游遍历");
+                    inheritedCanvas.FocusDepth = 1; inheritedCanvas.FocusDirection = "upstream"; inheritedCanvas.SelectEntity("node", "nested");
+                    Require(inheritedCanvas.FocusedEntitiesForTesting().Contains("node:parent") && inheritedCanvas.FocusedEdgesForTesting().Contains("to_area"), "区域内节点的上游未高亮父节点及原始区域连线");
+                    Require(!inheritedCanvas.InactiveSameNameNodeForTesting("nested"), "继承上游关系被误判为无父节点");
+                    inheritedCanvas.SelectEntity("edge", "to_area");
+                    Require(inheritedCanvas.FocusedEntitiesForTesting().Contains("node:nested"), "选择区域连线未高亮继承节点");
+                    inheritedCanvas.SelectEntity("node", "nested"); inheritedCanvas.MoveSelectedNodesForTesting(500, 0, true);
+                    Require(!inheritedCanvas.FocusedEntitiesForTesting().Contains("node:parent"), "节点移出区域后仍保留继承父节点");
+                    inheritedCanvas.MoveSelectedNodesForTesting(-500, 0, true);
+                    Require(inheritedCanvas.FocusedEntitiesForTesting().Contains("node:parent"), "节点移入区域后未恢复继承父节点");
+                    Require(inherited.edges.Count == 2, "继承关系不应生成额外实体连线");
+                }
+
+                GraphDocument gridGraph = GraphSerialization.CreateBlank("五单位间距回归");
+                gridGraph.nodes.Add(new GraphNode { id = "grid_a", x = -12.3f, y = 7.7f, w = 151, h = 54 });
+                gridGraph.nodes.Add(new GraphNode { id = "grid_b", x = 302.4f, y = 211.2f, w = 156, h = 47 });
+                gridGraph.nodes.Add(new GraphNode { id = "grid_c", x = 607.4f, y = 411.2f, w = 161, h = 62 });
+                gridGraph = GraphSerialization.Deserialize(GraphSerialization.Serialize(gridGraph, false));
+                Action checkGrid = delegate
+                {
+                    foreach (GraphNode a in gridGraph.nodes)
+                    {
+                        Require(a.x % 5 == 0 && a.y % 5 == 0 && a.w % 5 == 0 && a.h % 5 == 0, "节点坐标或尺寸不在五单位网格上");
+                        foreach (GraphNode b in gridGraph.nodes)
+                            Require((b.x - a.x - a.w) % 5 == 0 && (b.y - a.y - a.h) % 5 == 0, "节点边缘间距不是五的倍数");
+                    }
+                };
+                checkGrid();
+                GraphSelectionArrangement.Apply(gridGraph, gridGraph.nodes.Select(n => n.id).ToArray(), new string[0], SelectionArrangement.Horizontal);
+                checkGrid();
+                Require(gridGraph.nodes[1].x - gridGraph.nodes[0].x - gridGraph.nodes[0].w == gridGraph.nodes[2].x - gridGraph.nodes[1].x - gridGraph.nodes[1].w, "网格排列后间距不相等");
+                using (GraphCanvas gridCanvas = new GraphCanvas())
+                {
+                    gridCanvas.Document = gridGraph; gridCanvas.EditMode = true; gridCanvas.SelectEntity("node", "grid_a");
+                    Random gridRandom = new Random(5);
+                    for (int i = 0; i < 80; i++)
+                    {
+                        gridCanvas.MoveSelectedNodesForTesting((float)(gridRandom.NextDouble() * 80 - 40), (float)(gridRandom.NextDouble() * 80 - 40), i % 2 == 0);
+                        checkGrid();
+                    }
+                    gridGraph.nodes[0].x = 0; gridGraph.nodes[0].y = 0;
+                    gridGraph.nodes[1].x = gridGraph.nodes[0].w; gridGraph.nodes[1].y = 0;
+                    gridGraph.nodes[2].x = gridGraph.nodes[1].x + gridGraph.nodes[1].w; gridGraph.nodes[2].y = 0;
+                    gridCanvas.RefreshDocument(); gridCanvas.SelectEntity("node", "grid_c");
+                    gridCanvas.MoveSelectedNodesForTesting(0, 0, false);
+                    checkGrid();
+                    Require(gridCanvas.HorizontalSpacingHintActiveForTesting && gridCanvas.SpacingHintGapForTesting == 0, "零间距未保留或未显示等距提示");
+                }
+
                 GraphDocument alignmentGraph = GraphSerialization.CreateBlank("节点自动对齐测试");
                 alignmentGraph.nodes.Add(new GraphNode { id = "moving", label = "移动节点", type = "步骤", kind = "system", group = "", x = 100, y = 100, w = 150, h = 54, note = "" });
                 alignmentGraph.nodes.Add(new GraphNode { id = "stationary", label = "参照节点", type = "步骤", kind = "resource", group = "", x = 330, y = 100, w = 150, h = 54, note = "" });
@@ -893,7 +981,7 @@ namespace RelationshipGraphNative
                     Require(Math.Abs(alignmentGraph.nodes[0].x - 330) < .1f && Math.Abs(alignmentGraph.nodes[0].y - 100) < .1f, "拖动节点未自动吸附到参照节点");
                     Require(GraphCanvas.IsFreePlacementForTesting(Keys.Control) && !GraphCanvas.IsFreePlacementForTesting(Keys.None), "Ctrl 未正确切换自由摆放模式");
                     alignmentCanvas.MoveSelectedNodesForTesting(12.3f, 7.7f, true);
-                    Require(Math.Abs(alignmentGraph.nodes[0].x - 342.3f) < .1f && Math.Abs(alignmentGraph.nodes[0].y - 107.7f) < .1f, "Ctrl 拖动仍发生网格吸附或自动对齐");
+                    Require(Math.Abs(alignmentGraph.nodes[0].x - 340f) < .1f && Math.Abs(alignmentGraph.nodes[0].y - 110f) < .1f, "Ctrl 拖动没有遵守 5 单位网格");
                     Require(Single.IsNaN(alignmentCanvas.AlignmentGuideXForTesting) && Single.IsNaN(alignmentCanvas.AlignmentGuideYForTesting), "自由摆放时仍显示对齐参考线");
                 }
 
@@ -912,7 +1000,7 @@ namespace RelationshipGraphNative
                     distanceGraph.nodes[0].x = 100; distanceGraph.nodes[0].y = 100;
                     distanceGraph.nodes[1].x = 100; distanceGraph.nodes[1].y = 300;
                     distanceCanvas.RefreshDocument(); distanceCanvas.MoveSelectedNodesForTesting(0, 0, false);
-                    Require(Math.Abs(distanceCanvas.VerticalAlignmentDistanceForTesting - 146) < .1f, "上下对齐方块未显示垂直边缘间距");
+                    Require(Math.Abs(distanceCanvas.VerticalAlignmentDistanceForTesting - 145) < .1f, "上下对齐方块未显示垂直边缘间距");
                     using (System.Drawing.Bitmap distanceBitmap = new System.Drawing.Bitmap(900, 650))
                     using (System.Drawing.Graphics distanceGraphics = System.Drawing.Graphics.FromImage(distanceBitmap))
                         typeof(GraphCanvas).GetMethod("DrawAlignmentDistances", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic).Invoke(distanceCanvas, new object[] { distanceGraphics, 1f });
@@ -934,7 +1022,7 @@ namespace RelationshipGraphNative
                     Require(Math.Abs(spacingGraph.nodes[2].x - 500) < .1f, "水平等间距位置未自动吸附");
                     Require(spacingCanvas.HorizontalSpacingHintActiveForTesting && Math.Abs(spacingCanvas.SpacingHintGapForTesting - 50) < .1f, "水平等间距吸附未显示间距提示");
                     spacingCanvas.MoveSelectedNodesForTesting(12.3f, 0, true);
-                    Require(Math.Abs(spacingGraph.nodes[2].x - 512.3f) < .1f && !spacingCanvas.HorizontalSpacingHintActiveForTesting, "Ctrl 自由摆放未关闭等间距吸附提示");
+                    Require(Math.Abs(spacingGraph.nodes[2].x - 510f) < .1f && !spacingCanvas.HorizontalSpacingHintActiveForTesting, "Ctrl 自由摆放未关闭等间距吸附提示");
                 }
 
                 GraphDocument verticalSpacingGraph = GraphSerialization.CreateBlank("垂直等间距吸附测试");
@@ -946,7 +1034,7 @@ namespace RelationshipGraphNative
                 {
                     verticalSpacingCanvas.Size = new System.Drawing.Size(900, 650); verticalSpacingCanvas.Document = verticalSpacingGraph; verticalSpacingCanvas.EditMode = true; verticalSpacingCanvas.FitToView(); verticalSpacingCanvas.SelectEntity("node", "vertical_moving");
                     verticalSpacingCanvas.MoveSelectedNodesForTesting(0, -192f, false);
-                    Require(Math.Abs(verticalSpacingGraph.nodes[2].y - 308) < .1f, "垂直等间距位置未自动吸附");
+                    Require(Math.Abs(verticalSpacingGraph.nodes[2].y - 310) < .1f, "垂直等间距位置未自动吸附");
                     Require(verticalSpacingCanvas.VerticalSpacingHintActiveForTesting && Math.Abs(verticalSpacingCanvas.SpacingHintGapForTesting - 50) < .1f, "垂直等间距吸附未显示间距提示");
                 }
 
@@ -987,7 +1075,7 @@ namespace RelationshipGraphNative
                     Require(mixedSpacingCanvas.HorizontalSpacingHintActiveForTesting && Math.Abs(mixedSpacingCanvas.SpacingHintGapForTesting - 50) < .1f, "分组混合等间距未显示提示");
                     Require(Math.Abs(mixedSpacingCanvas.AlignmentGuideYForTesting - 100) < .1f, "分组未能与节点或其他分组对齐");
                     mixedSpacingCanvas.MoveSelectedGroupForTesting(12.3f, 7.7f, true);
-                    Require(Math.Abs(mixedSpacingGraph.groups[1].x - 512.3f) < .1f && Math.Abs(mixedSpacingGraph.groups[1].y - 107.7f) < .1f, "Ctrl 拖动分组仍发生吸附");
+                    Require(Math.Abs(mixedSpacingGraph.groups[1].x - 510f) < .1f && Math.Abs(mixedSpacingGraph.groups[1].y - 110f) < .1f, "Ctrl 拖动分组没有遵守 5 单位网格");
                     Require(!mixedSpacingCanvas.HorizontalSpacingHintActiveForTesting && Single.IsNaN(mixedSpacingCanvas.AlignmentGuideYForTesting), "Ctrl 自由拖动分组仍显示吸附提示");
                 }
 

@@ -9,14 +9,6 @@
     "build:desktop": "powershell -ExecutionPolicy Bypass -File desktop/build-desktop.ps1 -OutputName \"关系图编辑器.exe\"",
     "audit:native": "node tools/test-native-desktop.mjs --static",
     "test:desktop": "npm run test:native",
-    "test:native": "npm run build:desktop && node tools/test-native-desktop.mjs",
-    "legacy:audit": "node legacy-web/tools/audit-project.mjs",
-    "legacy:audit:routing": "node legacy-web/tools/audit-routing.mjs",
-    "legacy:audit:drag": "node legacy-web/tools/audit-drag-performance.mjs",
-    "legacy:audit:node-types": "node legacy-web/tools/audit-node-types.mjs",
-    "legacy:audit:readiness": "node legacy-web/tools/audit-product-readiness.mjs",
-    "legacy:test:store": "node legacy-web/tools/test-project-store.mjs",
-    "legacy:test:desktop": "node legacy-web/tools/test-desktop-experience.mjs",
-    "legacy:sync-default": "node legacy-web/tools/build-default-from-json.mjs"
+    "test:native": "npm run build:desktop && node tools/test-native-desktop.mjs"
   }
 }
