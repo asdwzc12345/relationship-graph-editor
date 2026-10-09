@@ -77,7 +77,7 @@ namespace RelationshipGraphNative
         public void SetStatus(string message, bool error)
         {
             _status.Text = message ?? "";
-            _status.ForeColor = error ? Color.FromArgb(196, 48, 43) : SystemColors.ControlText;
+            _status.ForeColor = error ? Color.FromArgb(196, 48, 43) : ForeColor;
         }
 
         public void Prepare(string query)

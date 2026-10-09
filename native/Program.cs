@@ -110,6 +110,9 @@ namespace RelationshipGraphNative
                     GraphDocument empty = startup.CanvasForTesting.Document;
                     Require(empty.meta.title == "未命名关系图" && empty.nodes.Count == 0 && empty.groups.Count == 0 && empty.edges.Count == 0, "启动时应打开空白关系图");
                     Require(empty.settings.relationTypes.Count == 1 && empty.settings.relationTypes[0].label == "关系", "空白图不应包含示例关系类别");
+                    Require(!startup.DirtyForTesting && startup.EditModeForTesting, "空白启动状态错误");
+                    GraphDocument normalizedEmpty = GraphSerialization.Clone(empty);
+                    Require(normalizedEmpty.nodes.Count == 0 && normalizedEmpty.settings.relationTypes.Count == 1, "空白图往返后出现示例数据");
                 }
                 GraphDocument graph = GraphSerialization.CreateBlank("导入导出自检");
                 for (int groupIndex = 0; groupIndex < 4; groupIndex++)
@@ -637,6 +640,7 @@ namespace RelationshipGraphNative
                     centerCreateWindow.AddNodeForTesting();
                     GraphNode centeredNode = centerCreateGraph.nodes[0];
                     Require(Math.Abs(centeredNode.x + centeredNode.w / 2f - initialCenter.X) <= 2.5f && Math.Abs(centeredNode.y + centeredNode.h / 2f - initialCenter.Y) <= 2.5f, "新增节点未创建在当前屏幕中心");
+                    Require(centeredNode.x % 5 == 0 && centeredNode.y % 5 == 0 && centeredNode.w % 5 == 0 && centeredNode.h % 5 == 0, "新建节点未遵守五单位网格");
                     Require(centeredNode.group == centeredGroup.id, "屏幕中心位于分组内时新增节点未自动归组");
                     System.Reflection.MethodInfo centerDown = typeof(GraphCanvas).GetMethod("OnMouseDown", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
                     System.Reflection.MethodInfo centerMove = typeof(GraphCanvas).GetMethod("OnMouseMove", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
@@ -934,6 +938,72 @@ namespace RelationshipGraphNative
                         Require(Math.Abs((firstDragType == "node" ? firstDragCanvas.Document.nodes[0].x : firstDragCanvas.Document.groups[0].x) - movedX) < .1f && dragCommits == 1, "显式取消未恢复位置或产生多余提交");
                     }
                 }
+                GraphDocument inherited = GraphSerialization.CreateBlank("区域继承父节点");
+                inherited.groups.Add(new GraphGroup { id = "area", x = 300, y = 0, w = 600, h = 500 });
+                inherited.groups.Add(new GraphGroup { id = "inner", x = 550, y = 150, w = 300, h = 250 });
+                inherited.nodes.Add(new GraphNode { id = "parent", label = "父节点", x = 0, y = 0, w = 150, h = 55 });
+                inherited.nodes.Add(new GraphNode { id = "child", label = "子节点", x = 350, y = 50, w = 150, h = 55 });
+                inherited.nodes.Add(new GraphNode { id = "nested", label = "嵌套节点", x = 600, y = 200, w = 150, h = 55 });
+                inherited.nodes.Add(new GraphNode { id = "outside", label = "外部节点", x = 1000, y = 200, w = 150, h = 55 });
+                inherited.edges.Add(new GraphEdge { id = "to_area", sourceType = "node", source = "parent", targetType = "group", target = "area" });
+                inherited.edges.Add(new GraphEdge { id = "to_outside", sourceType = "node", source = "nested", targetType = "node", target = "outside" });
+                using (GraphCanvas inheritedCanvas = new GraphCanvas())
+                {
+                    inheritedCanvas.Document = inherited; inheritedCanvas.EditMode = true;
+                    inheritedCanvas.FocusDepth = 1; inheritedCanvas.FocusDirection = "downstream";
+                    inheritedCanvas.SelectEntity("node", "parent");
+                    HashSet<string> descendants = inheritedCanvas.FocusedEntitiesForTesting();
+                    Require(descendants.Contains("node:child") && descendants.Contains("node:nested") && !descendants.Contains("node:outside"), "区域内节点未作为一层子节点高亮，或错误包含区域外节点");
+                    inheritedCanvas.FocusDepth = 2;
+                    Require(inheritedCanvas.FocusedEntitiesForTesting().Contains("node:outside"), "区域继承关系未参与多层下游遍历");
+                    inheritedCanvas.FocusDepth = 1; inheritedCanvas.FocusDirection = "upstream"; inheritedCanvas.SelectEntity("node", "nested");
+                    Require(inheritedCanvas.FocusedEntitiesForTesting().Contains("node:parent") && inheritedCanvas.FocusedEdgesForTesting().Contains("to_area"), "区域内节点的上游未高亮父节点及原始区域连线");
+                    Require(!inheritedCanvas.InactiveSameNameNodeForTesting("nested"), "继承上游关系被误判为无父节点");
+                    inheritedCanvas.SelectEntity("edge", "to_area");
+                    Require(inheritedCanvas.FocusedEntitiesForTesting().Contains("node:nested"), "选择区域连线未高亮继承节点");
+                    inheritedCanvas.SelectEntity("node", "nested"); inheritedCanvas.MoveSelectedNodesForTesting(500, 0, true);
+                    Require(!inheritedCanvas.FocusedEntitiesForTesting().Contains("node:parent"), "节点移出区域后仍保留继承父节点");
+                    inheritedCanvas.MoveSelectedNodesForTesting(-500, 0, true);
+                    Require(inheritedCanvas.FocusedEntitiesForTesting().Contains("node:parent"), "节点移入区域后未恢复继承父节点");
+                    Require(inherited.edges.Count == 2, "继承关系不应生成额外实体连线");
+                }
+
+                GraphDocument gridGraph = GraphSerialization.CreateBlank("五单位间距回归");
+                gridGraph.nodes.Add(new GraphNode { id = "grid_a", x = -12.3f, y = 7.7f, w = 151, h = 54 });
+                gridGraph.nodes.Add(new GraphNode { id = "grid_b", x = 302.4f, y = 211.2f, w = 156, h = 47 });
+                gridGraph.nodes.Add(new GraphNode { id = "grid_c", x = 607.4f, y = 411.2f, w = 161, h = 62 });
+                gridGraph = GraphSerialization.Deserialize(GraphSerialization.Serialize(gridGraph, false));
+                Action checkGrid = delegate
+                {
+                    foreach (GraphNode a in gridGraph.nodes)
+                    {
+                        Require(a.x % 5 == 0 && a.y % 5 == 0 && a.w % 5 == 0 && a.h % 5 == 0, "节点坐标或尺寸不在五单位网格上");
+                        foreach (GraphNode b in gridGraph.nodes)
+                            Require((b.x - a.x - a.w) % 5 == 0 && (b.y - a.y - a.h) % 5 == 0, "节点边缘间距不是五的倍数");
+                    }
+                };
+                checkGrid();
+                GraphSelectionArrangement.Apply(gridGraph, gridGraph.nodes.Select(n => n.id).ToArray(), new string[0], SelectionArrangement.Horizontal);
+                checkGrid();
+                Require(gridGraph.nodes[1].x - gridGraph.nodes[0].x - gridGraph.nodes[0].w == gridGraph.nodes[2].x - gridGraph.nodes[1].x - gridGraph.nodes[1].w, "网格排列后间距不相等");
+                using (GraphCanvas gridCanvas = new GraphCanvas())
+                {
+                    gridCanvas.Document = gridGraph; gridCanvas.EditMode = true; gridCanvas.SelectEntity("node", "grid_a");
+                    Random gridRandom = new Random(5);
+                    for (int i = 0; i < 80; i++)
+                    {
+                        gridCanvas.MoveSelectedNodesForTesting((float)(gridRandom.NextDouble() * 80 - 40), (float)(gridRandom.NextDouble() * 80 - 40), i % 2 == 0);
+                        checkGrid();
+                    }
+                    gridGraph.nodes[0].x = 0; gridGraph.nodes[0].y = 0;
+                    gridGraph.nodes[1].x = gridGraph.nodes[0].w; gridGraph.nodes[1].y = 0;
+                    gridGraph.nodes[2].x = gridGraph.nodes[1].x + gridGraph.nodes[1].w; gridGraph.nodes[2].y = 0;
+                    gridCanvas.RefreshDocument(); gridCanvas.SelectEntity("node", "grid_c");
+                    gridCanvas.MoveSelectedNodesForTesting(0, 0, false);
+                    checkGrid();
+                    Require(gridCanvas.HorizontalSpacingHintActiveForTesting && gridCanvas.SpacingHintGapForTesting == 0, "零间距未保留或未显示等距提示");
+                }
+
                 GraphDocument alignmentGraph = GraphSerialization.CreateBlank("节点自动对齐测试");
                 alignmentGraph.nodes.Add(new GraphNode { id = "moving", label = "移动节点", type = "步骤", kind = "system", group = "", x = 100, y = 100, w = 150, h = 54, note = "" });
                 alignmentGraph.nodes.Add(new GraphNode { id = "stationary", label = "参照节点", type = "步骤", kind = "resource", group = "", x = 330, y = 100, w = 150, h = 54, note = "" });

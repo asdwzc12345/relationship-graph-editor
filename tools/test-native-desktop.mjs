@@ -56,7 +56,8 @@ assert.ok(Object.values(packageJson.scripts || {})
 for (const file of ["index.html", "app.js", "app.css", "system-function-default.js"]) {
   assert.ok(!fs.existsSync(path.join(root, file)), `旧网页文件仍留在根目录：${file}`);
 }
-assert.ok(!fs.existsSync(path.join(root, "system-function-graph.json")), "已移除的示例图不应残留");
+assert.ok(!fs.existsSync(path.join(root, "system-function-graph.json")), "示例图数据不应保留");
+assert.ok(!fs.existsSync(path.join(root, "legacy-web", "system-function-graph.json")), "旧网页目录不应复制默认图 JSON 数据源");
 
 assert.match(sourceText, /namespace RelationshipGraphNative/);
 assert.match(sourceText, new RegExp(`AssemblyFileVersion\\("${versionPattern}\\.0"\\)`));
@@ -227,7 +228,7 @@ assert.match(sourceText, /addEventListener\('wheel'/);
 assert.match(sourceText, /event\.button!==2/);
 assert.match(sourceText, /if\(!moved\)\{selected=''\;clearClasses\(\)\;\}/);
 assert.match(sourceText, /locked=0/);
-assert.match(mainFormText, /飞书画板（draw\.io，可编辑）/);
+assert.match(mainFormText, /MenuItem\("Draw\.io 画板", Keys\.None, ExportFeishuBoard\)/);
 assert.doesNotMatch(graphCanvasText, /RelationColor/);
 assert.match(graphCanvasText, /BeginInlineEdit\("edge", edge\.id, "label"/);
 assert.match(sourceText, /new ColorCategoryChoice\("resource", "蓝色"/);

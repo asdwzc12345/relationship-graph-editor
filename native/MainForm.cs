@@ -179,7 +179,7 @@ namespace RelationshipGraphNative
             KeyDown += MainFormKeyDown;
 
             GraphDocument first = initialGraph ?? GraphSerialization.CreateBlank("未命名关系图");
-            LoadDocument(first, "已打开空白关系图", true, "", false, false);
+            LoadDocument(first, initialGraph == null ? "已打开空白关系图" : "关系图已打开", true, "", false, false);
             ApplyTheme();
         }
 
@@ -199,9 +199,9 @@ namespace RelationshipGraphNative
             file.DropDownItems.Add(MenuItem("另存为…", Keys.Control | Keys.Shift | Keys.S, delegate { SaveJson(true); }));
             file.DropDownItems.Add(new ToolStripSeparator());
             ToolStripMenuItem export = new ToolStripMenuItem("导出");
-            export.DropDownItems.Add(MenuItem("飞书画板（draw.io，可编辑）…", Keys.None, ExportFeishuBoard));
+            export.DropDownItems.Add(MenuItem("Draw.io 画板", Keys.None, ExportFeishuBoard));
             export.DropDownItems.Add(new ToolStripSeparator());
-            export.DropDownItems.Add(MenuItem("只读可视图（HTML）…", Keys.None, ExportReadonly));
+            export.DropDownItems.Add(MenuItem("Html 只读网页", Keys.None, ExportReadonly));
             export.DropDownItems.Add(MenuItem("SVG 矢量图…", Keys.None, ExportSvg));
             export.DropDownItems.Add(MenuItem("PNG 图片…", Keys.None, ExportPng));
             export.DropDownItems.Add(MenuItem("PDF 文档…", Keys.None, ExportPdf));
@@ -610,7 +610,6 @@ namespace RelationshipGraphNative
             if (!EnsureCurrentDocumentCanBeReplaced()) return;
             LoadDocument(recovered, message, true, "", true, true);
         }
-
         private void OpenGraph()
         {
             using (OpenFileDialog dialog = new OpenFileDialog())
@@ -1968,8 +1967,10 @@ namespace RelationshipGraphNative
 
         private string RelationSummary(string type, string id)
         {
-            int incoming = _canvas.Document.edges.Count(delegate(GraphEdge edge) { return edge.targetType == type && edge.target == id; });
-            int outgoing = _canvas.Document.edges.Count(delegate(GraphEdge edge) { return edge.sourceType == type && edge.source == id; });
+            string key = GraphSerialization.EndpointKey(type, id);
+            List<GraphSemanticRelation> relations = GraphSemanticRelation.Enumerate(_canvas.Document).ToList();
+            int incoming = relations.Where(r => r.TargetKey == key).Select(r => r.EdgeId).Distinct().Count();
+            int outgoing = relations.Where(r => r.SourceKey == key).Select(r => r.EdgeId).Distinct().Count();
             return "产出关系 " + incoming + " 条　消耗关系 " + outgoing + " 条";
         }
 
@@ -2087,7 +2088,7 @@ namespace RelationshipGraphNative
         private void AddArrangementItems(ToolStripItemCollection target, bool menu)
         {
             string[] labels = { "底对齐", "横向中心对齐", "横向均匀排布", "纵向均匀排布", "左侧边缘对齐", "右侧边缘对齐", "纵向中心对齐" };
-            string[] hints = { "至少选择两个对象，将底边对齐", "至少选择两个对象，将水平中心线对齐", "至少选择三个对象，固定左右两端，使水平间距相等", "至少选择三个对象，固定上下两端，使垂直间距相等", "至少选择两个对象，将左侧边缘对齐", "至少选择两个对象，将右侧边缘对齐", "至少选择两个对象，将竖直中心线对齐" };
+            string[] hints = { "至少选择两个对象，将底边对齐", "至少选择两个对象，将水平中心线对齐", "至少选择三个对象，固定左端，使水平间距为相等的 5 的倍数", "至少选择三个对象，固定上端，使垂直间距为相等的 5 的倍数", "至少选择两个对象，将左侧边缘对齐", "至少选择两个对象，将右侧边缘对齐", "至少选择两个对象，将竖直中心线对齐" };
             for (int i = 0; i < labels.Length; i++)
             {
                 SelectionArrangement mode = (SelectionArrangement)i;

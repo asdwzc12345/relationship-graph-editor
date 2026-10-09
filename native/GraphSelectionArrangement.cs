@@ -46,12 +46,12 @@ namespace RelationshipGraphNative
                 float start = horizontal ? items[0].Bounds.Left : items[0].Bounds.Top;
                 float end = horizontal ? items[items.Count - 1].Bounds.Right : items[items.Count - 1].Bounds.Bottom;
                 float total = items.Sum(item => horizontal ? item.Bounds.Width : item.Bounds.Height);
-                float gap = (end - start - total) / (items.Count - 1);
+                float gap = Math.Max(0, GraphSerialization.SnapToGrid((end - start - total) / (items.Count - 1)));
                 float position = start;
                 for (int i = 0; i < items.Count; i++)
                 {
                     Item item = items[i];
-                    if (i > 0 && i < items.Count - 1)
+                    if (i > 0)
                         item.Offset = horizontal ? new PointF(position - item.Bounds.Left, 0) : new PointF(0, position - item.Bounds.Top);
                     position += (horizontal ? item.Bounds.Width : item.Bounds.Height) + gap;
                 }

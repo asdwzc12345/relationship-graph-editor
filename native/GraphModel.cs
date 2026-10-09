@@ -10,6 +10,40 @@ using System.Web.Script.Serialization;
 
 namespace RelationshipGraphNative
 {
+    // Semantic links retain the original edge ID; inherited links are never saved or drawn.
+    internal sealed class GraphSemanticRelation
+    {
+        public string SourceKey;
+        public string TargetKey;
+        public string EdgeId;
+
+        public static IEnumerable<GraphSemanticRelation> Enumerate(GraphDocument graph)
+        {
+            Dictionary<string, List<GraphNode>> members = new Dictionary<string, List<GraphNode>>();
+            foreach (GraphNode node in graph.nodes)
+                foreach (string groupId in node.groups ?? new List<string>())
+                {
+                    List<GraphNode> list;
+                    if (!members.TryGetValue(groupId, out list)) members[groupId] = list = new List<GraphNode>();
+                    list.Add(node);
+                }
+            foreach (GraphEdge edge in graph.edges)
+            {
+                string source = GraphSerialization.EndpointKey(edge.sourceType, edge.source);
+                string target = GraphSerialization.EndpointKey(edge.targetType, edge.target);
+                yield return new GraphSemanticRelation { SourceKey = source, TargetKey = target, EdgeId = edge.id };
+                List<GraphNode> children;
+                if (edge.sourceType != "node" || edge.targetType != "group" || !members.TryGetValue(edge.target, out children)) continue;
+                foreach (GraphNode child in children)
+                {
+                    string childKey = GraphSerialization.EndpointKey("node", child.id);
+                    if (childKey != source)
+                        yield return new GraphSemanticRelation { SourceKey = source, TargetKey = childKey, EdgeId = edge.id };
+                }
+            }
+        }
+    }
+
     public sealed class GraphDocument
     {
         public int version { get; set; }
@@ -305,6 +339,9 @@ namespace RelationshipGraphNative
             };
         }
 
+        // Quantize both origins and sizes so all horizontal/vertical edge gaps stay on the grid.
+        public static float SnapToGrid(double value) { return SnapToGrid((float)value); }
+
         public static GraphDocument Normalize(GraphDocument graph)
         {
             if (graph == null) throw new InvalidDataException("关系图文件为空。");
@@ -340,10 +377,10 @@ namespace RelationshipGraphNative
                 if (!groupIdMap.ContainsKey(originalId)) groupIdMap[originalId] = group.id;
                 group.label = Clean(group.label, "分组 " + (i + 1), 40);
                 group.groups = new List<string>();
-                group.w = Clamp(Finite(group.w, 260), 120, MaxItemDimension);
-                group.h = Clamp(Finite(group.h, 220), 100, MaxItemDimension);
-                group.x = Clamp(Finite(group.x, 20), -MaxCoordinate, MaxCoordinate);
-                group.y = Clamp(Finite(group.y, 40), -MaxCoordinate, MaxCoordinate);
+                group.w = SnapToGrid(Clamp(Finite(group.w, 260), 120, MaxItemDimension));
+                group.h = SnapToGrid(Clamp(Finite(group.h, 220), 100, MaxItemDimension));
+                group.x = SnapToGrid(Clamp(Finite(group.x, 20), -MaxCoordinate, MaxCoordinate));
+                group.y = SnapToGrid(Clamp(Finite(group.y, 40), -MaxCoordinate, MaxCoordinate));
                 graph.groups[i] = group;
             }
 
@@ -364,10 +401,10 @@ namespace RelationshipGraphNative
                 string mappedGroup;
                 node.group = groupIdMap.TryGetValue(originalGroup, out mappedGroup) ? mappedGroup : (groupIds.Contains(originalGroup) ? originalGroup : "");
                 node.groups = new List<string>();
-                node.w = Clamp(Finite(node.w, 150), 105, MaxItemDimension);
-                node.h = Clamp(Finite(node.h, 55), 50, MaxItemDimension);
-                node.x = Clamp(Finite(node.x, 40), -MaxCoordinate, MaxCoordinate);
-                node.y = Clamp(Finite(node.y, 80), -MaxCoordinate, MaxCoordinate);
+                node.w = SnapToGrid(Clamp(Finite(node.w, 150), 105, MaxItemDimension));
+                node.h = SnapToGrid(Clamp(Finite(node.h, 55), 50, MaxItemDimension));
+                node.x = SnapToGrid(Clamp(Finite(node.x, 40), -MaxCoordinate, MaxCoordinate));
+                node.y = SnapToGrid(Clamp(Finite(node.y, 80), -MaxCoordinate, MaxCoordinate));
                 node.note = Clean(node.note, "", 300);
                 graph.nodes[i] = node;
             }
