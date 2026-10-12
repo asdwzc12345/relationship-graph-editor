@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
+import { verifyReadonlyFocus } from './test-readonly-focus.mjs';
 
 const root = path.resolve(import.meta.dirname, "..");
 const nativeRoot = path.join(root, "native");
@@ -226,7 +227,7 @@ assert.match(sourceText, /theme-dark/);
 assert.match(sourceText, /addEventListener\('pointermove'/);
 assert.match(sourceText, /addEventListener\('wheel'/);
 assert.match(sourceText, /event\.button!==2/);
-assert.match(sourceText, /if\(!moved\)\{selected=''\;clearClasses\(\)\;\}/);
+assert.match(sourceText, /button===2&&!moved\)\{selected=''\;clearClasses\(\)\;\}/);
 assert.match(sourceText, /locked=0/);
 assert.match(mainFormText, /MenuItem\("Draw\.io 画板", Keys\.None, ExportFeishuBoard\)/);
 assert.doesNotMatch(graphCanvasText, /RelationColor/);
@@ -266,6 +267,7 @@ if (staticOnly) {
     assert.equal(result.version, packageJson.version);
     assert.equal(result.runtime, "native-winforms");
     assert.deepEqual([result.groups, result.nodes, result.edges], [4, 12, 12]);
+    verifyReadonlyFocus(result.focusParity);
     const companions = fs.readdirSync(temp).filter((name) => name !== "关系图编辑器.exe" && name !== "self-test.json");
     assert.deepEqual(companions, [], "EXE 在独立文件夹中依赖了额外程序文件");
   } finally {

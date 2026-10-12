@@ -834,7 +834,7 @@ namespace RelationshipGraphNative
                 _currentFile = file; _savedDocumentFingerprint = DocumentFingerprint(_canvas.Document); SetDirty(false); UpdateTitle();
                 bool recentRecorded = RememberRecentFile(file);
                 bool recoveryCleared = ClearAutosaveSafely();
-                if (recoveryCleared) _statusText.Text = recentRecorded ? "JSON 已保存" : "JSON 已保存，但最近文件记录失败";
+                if (recoveryCleared) _statusText.Text = "JSON 已保存到：" + Path.GetFullPath(file) + (recentRecorded ? "" : "；最近文件记录失败");
                 return true;
             }
             catch (Exception error) { ShowError("无法保存文件", error); return false; }
@@ -842,6 +842,13 @@ namespace RelationshipGraphNative
 
         internal bool SaveJsonToFileForTesting(string file) { FinishPendingCanvasWork(); return SaveJsonToPath(file); }
         internal string CurrentFileForTesting { get { return _currentFile; } }
+        internal void OpenRecentFileForTesting(string file) { OpenRecentFile(file); }
+        internal bool BackgroundWorkActiveForTesting { get { return _activeWorkId != 0; } }
+        internal bool SaveShortcutForTesting()
+        {
+            Message message = new Message();
+            return ProcessCmdKey(ref message, Keys.Control | Keys.S);
+        }
 
         private bool EnsureCurrentDocumentCanBeReplaced()
         {
@@ -2147,6 +2154,11 @@ namespace RelationshipGraphNative
 
         protected override bool ProcessCmdKey(ref Message message, Keys keyData)
         {
+            if (keyData == (Keys.Control | Keys.S) || keyData == (Keys.Control | Keys.Shift | Keys.S))
+            {
+                if (_activeWorkId == 0) SaveJson((keyData & Keys.Shift) != 0);
+                return true;
+            }
             if (_activeWorkId != 0 && (keyData & Keys.KeyCode) == Keys.Escape)
             {
                 RequestBackgroundCancellation(); return true;

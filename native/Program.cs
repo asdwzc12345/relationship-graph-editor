@@ -297,6 +297,32 @@ namespace RelationshipGraphNative
                 }
                 Require(GraphSerialization.LoadFile(firstSaveAsPath).meta.title == "另存为原始版本" && GraphSerialization.LoadFile(secondSaveAsPath).meta.title == "另存为新版本", "另存为错误覆盖了原文件或未写入新文件");
 
+                string recentSaveFolder = Path.Combine(tempFolder, "recent-save-original");
+                Directory.CreateDirectory(recentSaveFolder);
+                string recentSavePath = Path.Combine(recentSaveFolder, "原图.json");
+                NativeExport.SaveJson(GraphSerialization.CreateBlank("最近文件原始版本"), recentSavePath);
+                using (MainForm recentWindow = new MainForm(null, false, Path.Combine(tempFolder, "recent-save-list.txt")))
+                {
+                    IntPtr windowHandle = recentWindow.Handle;
+                    recentWindow.OpenRecentFileForTesting(recentSavePath);
+                    DateTime openDeadline = DateTime.UtcNow.AddSeconds(5);
+                    while (recentWindow.BackgroundWorkActiveForTesting && DateTime.UtcNow < openDeadline)
+                    {
+                        Application.DoEvents();
+                        Thread.Sleep(10);
+                    }
+                    Require(!recentWindow.BackgroundWorkActiveForTesting, "最近文件打开超时");
+                    Require(recentWindow.CurrentFileForTesting == recentSavePath, "最近 JSON 文件打开后丢失原路径");
+                    recentWindow.CanvasForTesting.Document.meta.title = "最近文件修改后";
+                    Require(recentWindow.SaveShortcutForTesting(), "Ctrl+S 未处理保存");
+                    Require(GraphSerialization.LoadFile(recentSavePath).meta.title == "最近文件修改后", "最近文件修改未写回原路径");
+                    Require(GraphSerialization.LoadFile(recentSavePath + ".bak").meta.title == "最近文件原始版本", "原文件备份不正确");
+                    Require(recentWindow.SaveJsonToFileForTesting(secondSaveAsPath), "最近文件另存为失败");
+                    recentWindow.CanvasForTesting.Document.meta.title = "另存为后继续修改";
+                    Require(recentWindow.SaveShortcutForTesting(), "另存为后 Ctrl+S 未处理");
+                    Require(GraphSerialization.LoadFile(secondSaveAsPath).meta.title == "另存为后继续修改" && GraphSerialization.LoadFile(recentSavePath).meta.title == "最近文件修改后", "另存为后保存到了错误路径");
+                }
+
                 using (BackgroundWorkQueue backgroundQueue = new BackgroundWorkQueue("RelationshipGraph.SelfTest"))
                 using (ManualResetEvent progressSeen = new ManualResetEvent(false))
                 using (ManualResetEvent firstCompleted = new ManualResetEvent(false))
@@ -394,7 +420,7 @@ namespace RelationshipGraphNative
                 Require(html.Contains("id=\"graphData\"") && html.Contains("<svg"), "只读可视图内容不完整");
                 Require(html.Contains("id='toggleLines'") && html.Contains("lines-hidden") && html.Contains("applyFocus()"), "只读可视图缺少连线开关或节点关系响应");
                 Require(html.Contains("id='theme'") && html.Contains("prefers-color-scheme: dark") && html.Contains("theme-dark") && html.Contains("applyTheme()"), "只读可视图缺少跟随系统、浅色或深色主题");
-                Require(html.Contains("pointermove") && html.Contains("event.button!==2") && html.Contains("if(!moved){selected='';clearClasses();}") && html.Contains("view.x-=") && html.Contains("addEventListener('wheel'") && html.Contains("id='zoomIn'"), "只读可视图缺少右键清除、右键拖动平移或缩放能力");
+                Require(html.Contains("pointermove") && html.Contains("event.button!==2") && html.Contains("if(event.type==='pointerup'&&button===2&&!moved){selected='';clearClasses();}") && html.Contains("view.x-=") && html.Contains("addEventListener('wheel'") && html.Contains("id='zoomIn'"), "只读可视图缺少右键清除、右键拖动平移或缩放能力");
                 Require(html.Contains("contextmenu") && html.Contains("preventDefault"), "只读可视图未禁用浏览器右键菜单");
                 Require(NativeExport.BuildSvg(graph).StartsWith("<svg", StringComparison.Ordinal), "SVG 导出失败");
                 Require(NativeExport.BuildSvg(graph).Contains("data-kind="), "SVG 节点缺少只读深色主题所需的颜色分类标记");
@@ -1185,6 +1211,27 @@ namespace RelationshipGraphNative
                 unsafeCoordinateGraph = GraphSerialization.Normalize(unsafeCoordinateGraph);
                 Require(unsafeCoordinateGraph.nodes[0].x == GraphSerialization.MaxCoordinate && unsafeCoordinateGraph.nodes[0].y == -GraphSerialization.MaxCoordinate, "超出安全绘制范围的有限坐标未收敛");
 
+                List<PointF> labelTestPath = new List<PointF> { new PointF(0, 0), new PointF(200, 0) };
+                List<RectangleF> labelTestBlockers = new List<RectangleF>();
+                PointF? inlineLabel = GraphLayout.FindInlineLabel(labelTestPath, labelTestBlockers, 40, 26);
+                Require(inlineLabel.HasValue && PointsClose(inlineLabel.Value, new PointF(100, 0)), "独立连线标签没有贴在线段中点");
+                labelTestBlockers.Add(new RectangleF(80, -1, 30, 2));
+                inlineLabel = GraphLayout.FindInlineLabel(labelTestPath, labelTestBlockers, 40, 26);
+                Require(inlineLabel.HasValue && inlineLabel.Value.X < 60 && inlineLabel.Value.Y == 0, "共线标签未优先向来源寻找独立区段");
+                labelTestPath.Reverse();
+                inlineLabel = GraphLayout.FindInlineLabel(labelTestPath, labelTestBlockers, 40, 26);
+                Require(inlineLabel.HasValue && inlineLabel.Value.X > 130, "反向连线没有按来源方向查找标签位置");
+                labelTestPath.Reverse();
+                labelTestBlockers.Add(new RectangleF(-30, -30, 110, 60));
+                inlineLabel = GraphLayout.FindInlineLabel(labelTestPath, labelTestBlockers, 40, 26);
+                Require(inlineLabel.HasValue && inlineLabel.Value.X > 130, "来源方向无空间时未向目标查找");
+                labelTestBlockers.Add(new RectangleF(110, -1, 120, 2));
+                Require(!GraphLayout.FindInlineLabel(labelTestPath, labelTestBlockers, 40, 26).HasValue, "完全共线时错误地在线上放置标签");
+                labelTestPath = new List<PointF> { new PointF(0, 0), new PointF(0, 100), new PointF(100, 100) };
+                labelTestBlockers = new List<RectangleF> { new RectangleF(-1, 70, 102, 31) };
+                inlineLabel = GraphLayout.FindInlineLabel(labelTestPath, labelTestBlockers, 40, 26);
+                Require(inlineLabel.HasValue && inlineLabel.Value.X == 0 && inlineLabel.Value.Y < 57, "折线标签未沿路径向来源查找");
+
                 GraphDocument automaticLayoutGraph = GraphSerialization.CreateBlank("自动排版回归测试");
                 automaticLayoutGraph.nodes.Add(new GraphNode { id = "layout_a", label = "起点", type = "步骤", kind = "system", group = "", x = 100, y = 100, w = 150, h = 54, note = "" });
                 automaticLayoutGraph.nodes.Add(new GraphNode { id = "layout_b", label = "分支甲", type = "步骤", kind = "resource", group = "", x = 100, y = 100, w = 150, h = 54, note = "" });
@@ -1595,7 +1642,8 @@ namespace RelationshipGraphNative
                 Require(!MainForm.ShouldDeleteSelectionForTesting(Keys.Back, false), "Backspace 仍会删除节点");
                 Require(!MainForm.ShouldDeleteSelectionForTesting(Keys.Delete, true), "文字输入时 Delete 仍会删除节点");
                 Require(MainForm.ShouldDeleteSelectionForTesting(Keys.Delete, false), "画布 Delete 删除功能失效");
-                File.WriteAllText(reportPath, "{\"ok\":true,\"version\":\"5.0.0\",\"groups\":4,\"nodes\":12,\"edges\":12,\"runtime\":\"native-winforms\"}", new UTF8Encoding(false));
+                string focusParity = new System.Web.Script.Serialization.JavaScriptSerializer { MaxJsonLength = Int32.MaxValue }.Serialize(BuildReadonlyFocusParityFixture());
+                File.WriteAllText(reportPath, "{\"ok\":true,\"version\":\"5.0.0\",\"groups\":4,\"nodes\":12,\"edges\":12,\"runtime\":\"native-winforms\",\"focusParity\":" + focusParity + "}", new UTF8Encoding(false));
                 return 0;
             }
             catch (Exception error)
@@ -1615,6 +1663,42 @@ namespace RelationshipGraphNative
                 try { if (tempFolder.Length > 0 && Directory.Exists(tempFolder)) Directory.Delete(tempFolder, true); }
                 catch { }
             }
+        }
+
+        private static object BuildReadonlyFocusParityFixture()
+        {
+            GraphDocument graph = GraphSerialization.CreateBlank("HTML 高亮一致性");
+            graph.groups.Add(new GraphGroup { id = "area", x = 300, y = 0, w = 600, h = 500 });
+            graph.groups.Add(new GraphGroup { id = "inner", x = 550, y = 150, w = 300, h = 250 });
+            graph.groups.Add(new GraphGroup { id = "empty", x = 1300, y = 0, w = 200, h = 200 });
+            graph.nodes.Add(new GraphNode { id = "parent", label = "同名", x = 0, y = 0, w = 150, h = 55 });
+            graph.nodes.Add(new GraphNode { id = "child", label = "子节点", x = 350, y = 50, w = 150, h = 55 });
+            graph.nodes.Add(new GraphNode { id = "nested", label = "同名", x = 600, y = 200, w = 150, h = 55 });
+            graph.nodes.Add(new GraphNode { id = "outside", label = "外部", x = 1000, y = 200, w = 150, h = 55 });
+            graph.nodes.Add(new GraphNode { id = "inactive", label = "同名", x = 1000, y = 400, w = 150, h = 55 });
+            graph.edges.Add(new GraphEdge { id = "area_link", sourceType = "node", source = "parent", targetType = "group", target = "area" });
+            graph.edges.Add(new GraphEdge { id = "out_link", sourceType = "node", source = "nested", targetType = "node", target = "outside" });
+            graph.edges.Add(new GraphEdge { id = "cycle", sourceType = "node", source = "outside", targetType = "node", target = "parent" });
+            graph.edges.Add(new GraphEdge { id = "self", sourceType = "node", source = "inactive", targetType = "node", target = "inactive" });
+            List<object> cases = new List<object>();
+            using (GraphCanvas canvas = new GraphCanvas())
+            {
+                canvas.Document = graph;
+                var selections = graph.nodes.Select(n => new { type = "node", id = n.id })
+                    .Concat(graph.groups.Select(g => new { type = "group", id = g.id }))
+                    .Concat(graph.edges.Select(e => new { type = "edge", id = e.id }));
+                foreach (var selection in selections)
+                foreach (string direction in new[] { "all", "upstream", "downstream" })
+                for (int depth = 1; depth <= 3; depth++)
+                {
+                    canvas.SelectEntity(selection.type, selection.id); canvas.FocusDirection = direction; canvas.FocusDepth = depth;
+                    cases.Add(new { selected = selection.type + ":" + selection.id, direction = direction, depth = depth,
+                        entities = canvas.FocusedEntitiesForTesting().ToArray(), edges = canvas.FocusedEdgesForTesting().ToArray(),
+                        same = graph.nodes.Where(n => canvas.SameNameHighlightedForTesting(n.id)).Select(n => n.id).ToArray(),
+                        inactive = graph.nodes.Where(n => canvas.InactiveSameNameNodeForTesting(n.id)).Select(n => n.id).ToArray() });
+                }
+            }
+            return new { html = NativeExport.BuildReadonlyHtml(graph), cases = cases };
         }
 
         private static bool LayoutResultsMatch(GraphLayoutResult first, GraphLayoutResult second)

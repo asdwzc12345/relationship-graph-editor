@@ -1290,6 +1290,28 @@ namespace RelationshipGraphNative
 
                     float width = Math.Max(SafePositive(_options.MinimumLabelWidth, 44f), Math.Min(SafePositive(_options.MaximumLabelWidth, 600f), label.Length * SafePositive(_options.LabelCharacterWidth, 14f) + 18f));
                     float height = SafePositive(_options.LabelHeight, 26f);
+                    // Keep the entire label clear of other routes, including shared trunks.
+                    List<RectangleF> blockers = new List<RectangleF>(occupied);
+                    foreach (EdgeWork other in _edgeWork)
+                    {
+                        if (other == work || other.Route == null) continue;
+                        for (int segment = 1; segment < other.Route.Points.Count; segment++)
+                        {
+                            RectangleF bounds = RectangleFromPoints(other.Route.Points[segment - 1], other.Route.Points[segment]);
+                            bounds.Inflate(1f, 1f);
+                            blockers.Add(bounds);
+                        }
+                    }
+                    PointF? inlinePoint = FindInlineLabel(work.Route.Points, blockers, width, height);
+                    if (inlinePoint.HasValue)
+                    {
+                        PointF center = inlinePoint.Value;
+                        work.Route.LabelAnchorPoint = center;
+                        work.Route.LabelPoint = center;
+                        work.Route.LabelBounds = new RectangleF(center.X - width / 2f, center.Y - height / 2f, width, height);
+                        occupied.Add(Inflated(work.Route.LabelBounds, _options.LabelPadding));
+                        continue;
+                    }
                     List<LabelCandidate> candidates = LabelCandidates(work.Route.Points, width, height);
                     LabelCandidate best = null;
                     float bestScore = Single.MaxValue;
@@ -1648,6 +1670,59 @@ namespace RelationshipGraphNative
                 !Single.IsNaN(bounds.Width) && !Single.IsInfinity(bounds.Width) &&
                 !Single.IsNaN(bounds.Height) && !Single.IsInfinity(bounds.Height) &&
                 bounds.Width > 0f && bounds.Height > 0f;
+        }
+
+        // Subtract blocked intervals exactly, so even short exclusive sections are considered.
+        // Distances run from source to target: midpoint first, then source, then target.
+        internal static PointF? FindInlineLabel(IList<PointF> points, IList<RectangleF> blockers, float width, float height)
+        {
+            float total = PathLength(points), preferred = total / 2f, traveled = 0f;
+            float bestSource = -1f, bestTarget = Single.MaxValue;
+            for (int segment = 1; segment < points.Count; segment++)
+            {
+                PointF first = points[segment - 1], second = points[segment];
+                float length = Distance(first, second);
+                if (length <= Epsilon) continue;
+                bool horizontal = NearlyEqual(first.Y, second.Y);
+                if (!horizontal && !NearlyEqual(first.X, second.X)) { traveled += length; continue; }
+                float origin = horizontal ? first.X : first.Y;
+                float end = horizontal ? second.X : second.Y;
+                float fixedCoordinate = horizontal ? first.Y : first.X;
+                List<PointF> intervals = new List<PointF>();
+                intervals.Add(new PointF(Math.Min(origin, end), Math.Max(origin, end)));
+                foreach (RectangleF obstacle in blockers)
+                {
+                    RectangleF expanded = obstacle;
+                    expanded.Inflate(width / 2f + .1f, height / 2f + .1f);
+                    float crossMin = horizontal ? expanded.Top : expanded.Left;
+                    float crossMax = horizontal ? expanded.Bottom : expanded.Right;
+                    if (fixedCoordinate < crossMin || fixedCoordinate > crossMax) continue;
+                    float low = horizontal ? expanded.Left : expanded.Top;
+                    float high = horizontal ? expanded.Right : expanded.Bottom;
+                    for (int index = intervals.Count - 1; index >= 0; index--)
+                    {
+                        PointF interval = intervals[index];
+                        if (high < interval.X || low > interval.Y) continue;
+                        intervals.RemoveAt(index);
+                        if (low > interval.X) intervals.Add(new PointF(interval.X, low));
+                        if (high < interval.Y) intervals.Add(new PointF(high, interval.Y));
+                    }
+                    if (intervals.Count == 0) break;
+                }
+                foreach (PointF interval in intervals)
+                {
+                    float a = traveled + Math.Abs(interval.X - origin);
+                    float b = traveled + Math.Abs(interval.Y - origin);
+                    float low = Math.Min(a, b), high = Math.Max(a, b);
+                    if (low <= preferred && high >= preferred) return PointAtFraction(points, .5f);
+                    if (high < preferred) bestSource = Math.Max(bestSource, high);
+                    else bestTarget = Math.Min(bestTarget, low);
+                }
+                traveled += length;
+            }
+            float chosen = bestSource >= 0f ? bestSource : bestTarget;
+            if (chosen == Single.MaxValue || total <= Epsilon) return null;
+            return PointAtFraction(points, chosen / total);
         }
 
         private static PointF Center(RectangleF bounds) { return new PointF(bounds.Left + bounds.Width / 2f, bounds.Top + bounds.Height / 2f); }
